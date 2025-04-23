@@ -10,6 +10,7 @@
 		"@types/mongoose": "^5.11.96",
 		"apify": "^3.2.6",
 		"crawlee": "^3.11.5",
+		"dotenv": "^16.5.0",
 		"mongoose": "^8.13.2",
 		"playwright": "*"
 	},
