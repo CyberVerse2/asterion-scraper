@@ -1,5 +1,13 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+import Novel, { IChapter } from './models/Novel.js'; // Import model and interfaces
+
+// Load environment variables from .env file
+dotenv.config();
+
+// --- Interfaces & Types ---
 
 interface NovelDetails {
     title: string | null;
@@ -15,16 +23,35 @@ interface NovelDetails {
 }
 
 interface ChapterData {
+    chapterNumber: number; // Added chapter number
     url: string;
-    title: string | null;
+    title: string;
     content: string | null;
-    // comments: any[]; // Comments might require dynamic loading handling
 }
 
-// Function to add delay
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+// Utility function for delay
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 1. Scrape Novel Details
+// --- Database Connection ---
+
+async function connectDB(): Promise<void> {
+    const dbUri = process.env.MONGODB_URI;
+    if (!dbUri) {
+        console.error('Error: MONGODB_URI is not defined in .env file.');
+        process.exit(1); // Exit if DB URI is missing
+    }
+    try {
+        await mongoose.connect(dbUri);
+        console.log('MongoDB Connected successfully.');
+    } catch (err: unknown) {
+        console.error('MongoDB connection error:', err);
+        process.exit(1); // Exit on connection error
+    }
+}
+
+// --- Scraping Functions ---
+
+// 1. Scrape Novel Details (Keep as is)
 async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
     console.log(`Fetching novel details from: ${novelUrl}`);
     try {
@@ -52,8 +79,11 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
     }
 }
 
-// 3. Scrape Chapter Content
-async function scrapeChapterContent(chapterUrl: string): Promise<ChapterData> {
+// 3. Scrape Chapter Content (Modified to include chapterNumber)
+async function scrapeChapterContent(
+    chapterUrl: string,
+    chapterNumber: number // Accept chapter number
+): Promise<ChapterData> {
     console.log(`Fetching chapter content from: ${chapterUrl}`);
     try {
         const { data } = await axios.get(chapterUrl);
@@ -77,7 +107,7 @@ async function scrapeChapterContent(chapterUrl: string): Promise<ChapterData> {
         }
 
         console.log(`Successfully scraped content for chapter: ${title}`);
-        return { url: chapterUrl, title, content };
+        return { url: chapterUrl, title, content, chapterNumber }; // Return chapterNumber
 
     } catch (error: unknown) {
         console.error(`Error fetching or parsing chapter content from ${chapterUrl}:`, error);
@@ -137,7 +167,8 @@ async function scrapeNovel(startUrl: string): Promise<void> {
             const dynamicChapterUrl = `${chaptersBaseUrl}/chapter-${i}`;
             try {
                 console.log(`Processing Chapter ${i}/${latestChapterNumber}: ${dynamicChapterUrl}`);
-                const chapterData = await scrapeChapterContent(dynamicChapterUrl);
+                // Pass chapter number 'i' to scrapeChapterContent
+                const chapterData = await scrapeChapterContent(dynamicChapterUrl, i);
                 if (chapterData.content) {
                     allChaptersData.push(chapterData);
                 }
@@ -155,14 +186,52 @@ async function scrapeNovel(startUrl: string): Promise<void> {
 
         console.log('\n--- Finished Scraping Chapters ---');
         console.log(`Successfully scraped content for ${allChaptersData.length} out of ${latestChapterNumber} chapters.`);
-        // TODO: Do something with allChaptersData (e.g., save to file, database)
-        // For now, let's log the first chapter's data if available
-        if (allChaptersData.length > 0) {
-            console.log('\n--- Example: First Scraped Chapter Data ---');
-            console.log(allChaptersData[0]);
+
+        // --- Save to Database ---
+        if (allChaptersData.length > 0 && novelDetails.title) {
+            console.log(`\n--- Saving/Updating ${novelDetails.title} in Database ---`);
+            try {
+                // Map scraped data to the IChapter interface format
+                const chaptersToSave: IChapter[] = allChaptersData.map(ch => ({
+                    chapterNumber: ch.chapterNumber,
+                    url: ch.url,
+                    title: ch.title,
+                    content: ch.content || '', // Ensure content is not null
+                }));
+
+                const updatedNovel = await Novel.findOneAndUpdate(
+                    { title: novelDetails.title }, // Find by unique title
+                    {
+                        // Update with latest details
+                        novelUrl: startUrl,
+                        author: novelDetails.author,
+                        rank: novelDetails.rank,
+                        totalChapters: novelDetails.chapters,
+                        views: novelDetails.views,
+                        bookmarks: novelDetails.bookmarks,
+                        status: novelDetails.status,
+                        genres: novelDetails.genres,
+                        summary: novelDetails.summary,
+                        chaptersUrl: novelDetails.chaptersUrl,
+                        chapters: chaptersToSave, // Set/update chapters array
+                        lastScraped: new Date(),
+                    },
+                    {
+                        upsert: true, // Create if doesn't exist
+                        new: true,    // Return the updated document
+                        setDefaultsOnInsert: true, // Apply default values on insert
+                    }
+                );
+                console.log(`Successfully saved/updated ${updatedNovel?.chapters.length} chapters for ${updatedNovel?.title} in the database.`);
+            } catch (dbError) {
+                console.error(`Error saving novel data to database:`, dbError);
+            }
+        } else {
+            console.log('No chapters scraped or novel title missing, skipping database save.');
         }
+
     } catch (error) {
-        console.error('--- An error occurred during the scraping process ---');
+        console.error('\n--- An error occurred during the scraping process ---');
         console.error(error);
     }
 }
@@ -171,12 +240,16 @@ async function scrapeNovel(startUrl: string): Promise<void> {
 // Replace with the actual novel URL you want to scrape
 const novelUrlToScrape = 'https://novelfire.net/book/shadow-slave';
 
-// Use an async IIFE to allow await and catch errors. Prepend with void to satisfy linter.
+// Use an async IIFE to allow await and catch errors.
 // eslint-disable-next-line @typescript-eslint/no-floating-promises
 (async () => {
     try {
+        await connectDB(); // Connect to DB first
         await scrapeNovel(novelUrlToScrape);
     } catch (error) {
         console.error('Unhandled error during script execution:', error);
+    } finally {
+        await mongoose.disconnect(); // Ensure disconnection
+        console.log('MongoDB Disconnected.');
     }
 })();
