@@ -11,20 +11,22 @@ The scraper performs the following steps:
 3. Iterates from chapter 1 up to the latest chapter number.
 4. For each chapter, it constructs the URL dynamically.
 5. Scrapes the chapter title and content using Axios for HTTP requests and Cheerio for HTML parsing.
-6. Logs the scraped data to the console.
+6. Saves the novel details and all scraped chapter content to a MongoDB database.
 
 ## Technologies Used
 
--   Node.js
--   TypeScript
--   Axios (for HTTP requests)
--   Cheerio (for HTML parsing)
--   ts-node (for running TypeScript directly)
--   ESLint (for linting)
+- Node.js
+- TypeScript
+- Axios (for HTTP requests)
+- Cheerio (for HTML parsing)
+- Mongoose (for MongoDB interaction)
+- dotenv (for environment variables)
+- ts-node (for running TypeScript directly)
+- ESLint (for linting)
 
 ## Setup
 
-1. **Prerequisites:** Ensure you have [Node.js](https://nodejs.org/) (which includes npm) installed.
+1. **Prerequisites:** Ensure you have [Node.js](https://nodejs.org/) (which includes npm) and [MongoDB](https://www.mongodb.com/try/download/community) installed and running.
 2. **Clone the repository:**
 
     ```bash
@@ -38,6 +40,16 @@ The scraper performs the following steps:
     npm install
     ```
 
+4. **Configure Environment:**
+   - Create a `.env` file in the project root directory (`asterion-scraper/.env`).
+   - Add your MongoDB connection string to this file:
+
+     ```bash
+     MONGODB_URI=your_mongodb_connection_string_here
+     ```
+
+     (Replace `your_mongodb_connection_string_here` with your actual URI, e.g., `mongodb://localhost:27017/asterionScraper`)
+
 ## Running the Scraper
 
 1. **Execute the script:**
@@ -46,18 +58,19 @@ The scraper performs the following steps:
     npx ts-node scraper.ts
     ```
 
-    The script will start fetching novel details, determine the chapter range, and then begin scraping each chapter sequentially. Progress and scraped data will be logged to the console.
+    The script will start fetching novel details, determine the chapter range, and then begin scraping each chapter sequentially. Progress will be logged to the console. Upon completion, the novel details and chapter content will be saved or updated in your configured MongoDB database.
 
     **Note:** The script includes a 1-second delay between chapter requests to avoid overloading the target server. Scraping a large number of chapters will take a significant amount of time.
 
 ## Configuration
 
--   The target novel URL is currently hardcoded in the `scraper.ts` file within the `novelUrlToScrape` constant. Modify this variable to scrape a different novel (ensure selectors in the `scrapeNovelDetails` and `scrapeChapterContent` functions are adjusted accordingly for the new target website's structure).
+- The target novel URL is currently hardcoded in the `scraper.ts` file within the `novelUrlToScrape` constant. Modify this variable to scrape a different novel (ensure selectors in the `scrapeNovelDetails` and `scrapeChapterContent` functions are adjusted accordingly for the new target website's structure).
+- The MongoDB connection string is configured via the `MONGODB_URI` variable in the `.env` file.
 
 ## Future Improvements
 
--   Save scraped data to a file (e.g., JSON, CSV) or a database instead of just logging.
--   Implement command-line arguments for specifying the target URL or chapter range.
--   Add more robust error handling and retry logic.
--   Integrate a proper logging library.
--   Potentially use a browser automation tool like Playwright or Puppeteer if sites require JavaScript execution or have stricter anti-bot measures (though Axios/Cheerio is sufficient for the current target).
+- Save scraped data to a file (e.g., JSON, CSV) or a database instead of just logging. (Database saving implemented with MongoDB)
+- Implement command-line arguments for specifying the target URL or chapter range.
+- Add more robust error handling and retry logic.
+- Integrate a proper logging library.
+- Potentially use a browser automation tool like Playwright or Puppeteer if sites require JavaScript execution or have stricter anti-bot measures (though Axios/Cheerio is sufficient for the current target).
