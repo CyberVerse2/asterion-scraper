@@ -7,8 +7,10 @@
 		"node": ">=18.0.0"
 	},
 	"dependencies": {
+		"@types/mongoose": "^5.11.96",
 		"apify": "^3.2.6",
 		"crawlee": "^3.11.5",
+		"mongoose": "^8.13.2",
 		"playwright": "*"
 	},
 	"devDependencies": {
