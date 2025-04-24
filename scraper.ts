@@ -3,6 +3,8 @@ import * as cheerio from 'cheerio';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import { Novel, Chapter, INovel, IChapter } from './models/Novel.js'; // Import named exports for models and the INovel interface
+import * as fs from 'fs'; // Import fs module
+import * as path from 'path'; // Import path module for joining paths
 
 // Load environment variables from .env file
 dotenv.config();
@@ -370,6 +372,45 @@ async function main() {
         console.log(`DB Novel Updates OK:   ${stats.dbNovelUpdateSuccess}`);
         console.log(`DB Chapter Updates OK: ${stats.dbChapterUpdateSuccess}`);
         console.log(`Total Database Errors: ${stats.dbErrors}`);
+
+        // --- Write Stats to File ---
+        try {
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-'); // Format timestamp for filename
+            const statsFilename = `scraper-stats-${timestamp}.txt`;
+            const statsFilePath = path.join(__dirname, statsFilename); // Place it in the script's directory
+
+            const statsString = 
+`--- Scraper Run Finished ---
+Timestamp: ${new Date(stats.endTime).toISOString()}
+Total Duration: ${stats.durationSeconds.toFixed(2)} seconds
+
+--- URLs --- 
+URLs Attempted:   ${startUrls.length}
+
+--- Novels ---
+Novels Processed (DB OK): ${stats.novelsProcessed}
+Novels Skipped/Failed: ${stats.novelsSkippedOrFailed}
+
+--- Chapters ---
+Total Chapters Attempted:  ${stats.chaptersAttempted}
+  - Scraped Successfully:  ${stats.chaptersScrapedSuccess}
+  - Scraped Empty/Miss:    ${stats.chaptersWithEmptyContent}
+  - Scrape Errors:         ${stats.chaptersScrapedError}
+
+--- Database Operations ---
+DB Novel Updates OK:   ${stats.dbNovelUpdateSuccess}
+DB Chapter Updates OK: ${stats.dbChapterUpdateSuccess}
+Total Database Errors: ${stats.dbErrors}
+`;
+
+            fs.writeFileSync(statsFilePath, statsString);
+            console.log(`
+Statistics written to: ${statsFilePath}`);
+        } catch (fileError) {
+            console.error(`
+Error writing statistics to file:`, fileError);
+        }
+        // ---------------------------
 
         if (mongoose.connection.readyState === 1) {
             await mongoose.disconnect();
