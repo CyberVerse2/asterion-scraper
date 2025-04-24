@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project contains a web scraper built with Node.js and TypeScript designed to extract chapter content from novel websites. It currently targets the novel "Shadow Slave" hosted on `novelfire.net`.
+This project contains a web scraper built with Node.js and TypeScript designed to extract chapter content from novel websites. It currently targets a predefined list of novels hosted on `novelfire.net`.
 
 The scraper performs the following steps:
 
@@ -30,7 +30,7 @@ The scraper performs the following steps:
 2. **Clone the repository:**
 
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/your-username/asterion-scraper.git # Replace with your actual repo URL
     cd asterion-scraper
     ```
 
@@ -70,7 +70,7 @@ The script will start fetching novel details, determine the chapter range, and t
 
 ## Configuration
 
-- The target novel URL is currently hardcoded in the `scraper.ts` file within the `novelUrlToScrape` constant. Modify this variable to scrape a different novel (ensure selectors in the `scrapeNovelDetails` and `scrapeChapterContent` functions are adjusted accordingly for the new target website's structure).
+- The target novels are defined in the `startUrls` array within the `scraper.ts` file. Modify this array to add or remove novels. Ensure selectors in the `scrapeNovelDetails` and `scrapeChapterContent` functions are compatible with `novelfire.net`'s structure.
 - The MongoDB connection string is configured via the `MONGODB_URI` variable in the `.env` file.
 
 ## Future Improvements
