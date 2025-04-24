@@ -26,6 +26,7 @@ interface NovelDetails {
     genres: string[];
     summary: string | null;
     chaptersUrl: string | null;
+    imageUrl: string | null; // Added imageUrl field
 }
 
 interface ChapterLink {
@@ -63,23 +64,36 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
         const { data } = await axios.get(novelUrl);
         const $ = cheerio.load(data);
 
-        // Extract details (Adjust selectors as needed for novelfire.net)
-        const title = $('.wrap > h1').text().trim() || null;
-        const author = $('.author > span:nth-child(2)').text().trim() || null;
-        const rank = $('.rank > strong').text().trim() || null;
-        const chapters = $('.book-info > div:nth-child(3) > span:nth-child(2)').text().trim() || null;
-        const views = $('.book-info > div:nth-child(4) > span:nth-child(2)').text().trim() || null;
-        const bookmarks = $('.book-info > div:nth-child(5) > span:nth-child(2)').text().trim() || null;
-        const status = $('.status > span:nth-child(2)').text().trim() || null;
-        const genres = $('.category a').map((i, el) => $(el).text().trim()).get();
-        const summary = $('#info-summary > p').text().trim() || null;
-        const chaptersUrl = $('.book-buttons a:contains("Chapters")').attr('href') || null;
+        // Extract details (Selectors updated for novelfire.net as of 2025-04-24)
+        const title = $('h1.novel-title').text().trim() || null;
+        const author = $('.author a span[itemprop="author"]').first().text().trim() || null; // Get first author listed
+        const rank = $('.rank strong').text().replace('RANK ','').trim() || null; // Remove prefix
+        const chapters = $('.header-stats span:nth-child(1) strong').text().trim() || null;
+        const views = $('.header-stats span:nth-child(2) strong').text().trim() || null;
+        const bookmarks = $('.header-stats span:nth-child(3) strong').text().trim() || null;
+        const status = $('.header-stats span:nth-child(4) strong').text().trim() || null;
+        const genres = $('.categories ul a').map((i, el) => $(el).text().trim()).get();
+        const summary = $('.summary .introduce .inner').text().trim() || null;
+        let chaptersUrl = $('a.chapter-latest-container').attr('href') || null;
+        let imageUrl = $('figure.cover img.lazy').attr('data-src') || $('figure.cover img.lazy').attr('src') || null; // Get data-src or src
 
-        return { title, author, rank, chapters, views, bookmarks, status, genres, summary, chaptersUrl };
+        // Ensure chaptersUrl is absolute
+        if (chaptersUrl && !chaptersUrl.startsWith('http')) {
+            const baseUrl = new URL(novelUrl).origin;
+            chaptersUrl = new URL(chaptersUrl, baseUrl).href;
+        }
+
+        // Ensure imageUrl is absolute
+        if (imageUrl && !imageUrl.startsWith('http')) {
+            const baseUrl = new URL(novelUrl).origin;
+            imageUrl = new URL(imageUrl, baseUrl).href;
+        }
+
+        return { title, author, rank, chapters, views, bookmarks, status, genres, summary, chaptersUrl, imageUrl };
     } catch (error: unknown) {
         console.error(`Error fetching or parsing novel details from ${novelUrl}:`, error);
         // Return default/null object to indicate failure but allow potential partial processing
-        return { title: null, author: null, rank: null, chapters: null, views: null, bookmarks: null, status: null, genres: [], summary: null, chaptersUrl: null };
+        return { title: null, author: null, rank: null, chapters: null, views: null, bookmarks: null, status: null, genres: [], summary: null, chaptersUrl: null, imageUrl: null };
     }
 }
 
@@ -168,7 +182,7 @@ async function main() {
         await connectDB();
 
         // *** Replace with your actual starting URL(s) ***
-        const startUrl = 'https://novelfire.net/book/shadow-slave'; // Example
+        const startUrl = 'https://novelfire.net/book/reverend-insanity'; // Example
 
         console.log(`--- Starting Scraper Run at ${new Date(startTime).toISOString()} ---`);
 
@@ -183,8 +197,21 @@ async function main() {
         console.log('\n--- Novel Details ---');
         console.log(novelDetails);
 
-        // Determine latest chapter number
-        const latestChapterNumber = await getLatestChapterNumber(novelDetails.chaptersUrl);
+        // Determine latest chapter number --- USE VALUE FROM DETAILS
+        let latestChapterNumber: number | null = null;
+        if (novelDetails.chapters) {
+            const parsedChapters = parseInt(novelDetails.chapters, 10);
+            if (!isNaN(parsedChapters) && parsedChapters > 0) {
+                latestChapterNumber = parsedChapters;
+                console.log(`\nUsing total chapters count from novel details: ${latestChapterNumber}`);
+            } else {
+                console.error(`Could not parse valid chapter count ('${novelDetails.chapters}') from novel details.`);
+            }
+        } else {
+            console.error('Novel details did not contain a chapter count.');
+        }
+        // --- Remove call to scrape chapter index page ---
+        // const latestChapterNumber = await getLatestChapterNumber(novelDetails.chaptersUrl);
 
         if (latestChapterNumber === null) {
             console.error('Failed to determine the latest chapter number. Aborting chapter scrape.');
@@ -210,6 +237,7 @@ async function main() {
                             genres: novelDetails.genres,
                             summary: novelDetails.summary,
                             chaptersUrl: novelDetails.chaptersUrl,
+                            imageUrl: novelDetails.imageUrl, // Added imageUrl
                             lastScraped: new Date(), // Update last scraped time
                         }
                     },
@@ -240,7 +268,6 @@ async function main() {
         // 2. Loop through chapters, scrape, and save individually
         const chaptersBaseUrl = novelDetails.chaptersUrl.split('/chapters')[0];
         console.log(`\n--- Processing Chapters 1 to ${latestChapterNumber} ---`);
-        const chapterIds: mongoose.Schema.Types.ObjectId[] = []; // Keep track of saved chapter IDs
 
         for (let i = 1; i <= latestChapterNumber; i++) {
             stats.chaptersAttempted++;
@@ -274,9 +301,28 @@ async function main() {
                             }
                         );
                         if (savedChapter) {
-                            chapterIds.push(savedChapter._id as mongoose.Schema.Types.ObjectId);
                             stats.dbChapterUpdateSuccess++;
                             console.log(`  Saved/Updated Chapter ${savedChapter.chapterNumber} (ID: ${savedChapter._id})`);
+
+                            // --- Update Novel's Chapter List Immediately ---
+                            try {
+                                const updateResult = await Novel.updateOne(
+                                    { _id: savedNovel._id }, // Target the novel
+                                    { $addToSet: { chapters: savedChapter._id } } // Add chapter ID if not present
+                                );
+                                if (updateResult.modifiedCount > 0) {
+                                    console.log(`    - Novel chapter list updated with Chapter ${savedChapter.chapterNumber}`);
+                                } else if (updateResult.matchedCount === 1 && updateResult.modifiedCount === 0) {
+                                    console.log(`    - Chapter ${savedChapter.chapterNumber} ID already in Novel list.`);
+                                }
+                                // else: matchedCount = 0 means novel ID wasn't found, which shouldn't happen here
+
+                            } catch (novelUpdateError) {
+                                stats.dbErrors++; // Count as DB Error
+                                console.error(`    - Error updating Novel chapter list for chapter ${savedChapter.chapterNumber}:`, novelUpdateError);
+                            }
+                            // -------------------------------------------
+
                         } else {
                             console.warn(`  DB op ok, but failed to get Chapter ${chapterData.chapterNumber} doc back.`);
                             stats.dbErrors++;
@@ -305,31 +351,6 @@ async function main() {
         console.log('\n--- Finished Processing Chapters ---');
         console.log(`Attempted: ${stats.chaptersAttempted}, Scraped OK: ${stats.chaptersScrapedSuccess}, Empty Content: ${stats.chaptersWithEmptyContent}, Scrape Errors: ${stats.chaptersScrapedError}`);
         console.log(`DB Chapters Saved/Updated: ${stats.dbChapterUpdateSuccess}, DB Errors during save: ${stats.dbErrors}`);
-
-        // --- Update Novel with Chapter List ---
-        if (savedNovel && chapterIds.length > 0) {
-            console.log(`\n--- Updating Novel ${savedNovel.title} with ${chapterIds.length} Chapter References ---`);
-            try {
-                // Check if the chapter list actually changed to avoid unnecessary save
-                const currentChapterIds = savedNovel.chapters.map(id => id.toString());
-                const newChapterIds = chapterIds.map(id => id.toString());
-                // Simple length check or more sophisticated set comparison if needed
-                if (currentChapterIds.length !== newChapterIds.length || !newChapterIds.every(id => currentChapterIds.includes(id))) {
-                    savedNovel.chapters = chapterIds; // Update the list
-                    await savedNovel.save();
-                    console.log(`Successfully updated Novel ${savedNovel.title}.`);
-                } else {
-                    console.log(`Chapter list for Novel ${savedNovel.title} is already up-to-date. No update needed.`);
-                }
-            } catch (novelUpdateError) {
-                stats.dbErrors++; // Count error during final novel save
-                console.error(`Error updating novel ${savedNovel.title} with chapter list:`, novelUpdateError);
-            }
-        } else if (savedNovel) {
-            console.log(`No new chapters were successfully saved for ${savedNovel.title}. Novel reference list not updated.`);
-        } else {
-            console.log('Novel document was not available, cannot update chapter list.');
-        }
 
     } catch (error) {
         console.error("An unexpected error occurred during the main process:", error);

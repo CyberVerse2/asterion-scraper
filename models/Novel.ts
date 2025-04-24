@@ -14,7 +14,7 @@ export interface IChapter extends Document { // Chapters are now separate docume
 // Interface representing a novel document
 export interface INovel extends Document {
   title: string;
-  novelUrl: string;
+  novelUrl?: string;
   author?: string | null;
   rank?: string | null;
   totalChapters?: string | null; // Chapters count as reported by site
@@ -24,6 +24,7 @@ export interface INovel extends Document {
   genres?: string[];
   summary?: string | null;
   chaptersUrl?: string | null; // URL to the chapter list page
+  imageUrl?: string; // Added imageUrl field
   chapters: mongoose.Schema.Types.ObjectId[]; // Array of Chapter ObjectIds
   lastScraped?: Date;
 }
@@ -70,8 +71,7 @@ const NovelSchema: Schema<INovel> = new Schema({
     index: true
   },
   novelUrl: {
-    type: String,
-    required: true
+    type: String
   },
   author: { type: String },
   rank: { type: String },
@@ -82,6 +82,7 @@ const NovelSchema: Schema<INovel> = new Schema({
   genres: [{ type: String }],
   summary: { type: String },
   chaptersUrl: { type: String },
+  imageUrl: { type: String }, // Added imageUrl field
   chapters: [{ // Array of references to Chapter documents
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Chapter' // Refers to the 'Chapter' model
