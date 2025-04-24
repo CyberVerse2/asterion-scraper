@@ -108,7 +108,7 @@ async function scrapeChapterContent(chapterUrl: string, chapterNumber: number): 
         const $ = cheerio.load(data);
 
         // Extract title (adjust selector)
-        const chapterTitle = $('.wrap > h1').text().trim();
+        const chapterTitle = $('h1 span.chapter-title').text().trim();
 
         // Extract chapter content - **MODIFIED TO GET HTML**
         // Use the selector for the main content container
