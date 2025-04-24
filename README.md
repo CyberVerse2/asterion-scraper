@@ -52,15 +52,21 @@ The scraper performs the following steps:
 
 ## Running the Scraper
 
-1. **Execute the script:**
+Once the environment variables are set and MongoDB is running, you can start the scraper:
 
-    ```bash
-    npx ts-node scraper.ts
-    ```
+```bash
+npm start
+```
 
-    The script will start fetching novel details, determine the chapter range, and then begin scraping each chapter sequentially. Progress will be logged to the console. Upon completion, the novel details and chapter content will be saved or updated in your configured MongoDB database.
+Alternatively, if you want to run the TypeScript file directly (ensure dependencies are installed):
 
-    **Note:** The script includes a 1-second delay between chapter requests to avoid overloading the target server. Scraping a large number of chapters will take a significant amount of time.
+```bash
+node --loader ts-node/esm scraper.ts
+```
+
+The script will start fetching novel details, determine the chapter range, and then begin scraping each chapter sequentially. Progress will be logged to the console. Upon completion, the novel details and chapter content will be saved or updated in your configured MongoDB database.
+
+**Note:** The script includes a 1-second delay between chapter requests to avoid overloading the target server. Scraping a large number of chapters will take a significant amount of time.
 
 ## Configuration
 
