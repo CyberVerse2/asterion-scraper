@@ -182,7 +182,7 @@ async function main() {
         await connectDB();
 
         // *** Replace with your actual starting URL(s) ***
-        const startUrl = 'https://novelfire.net/book/reverend-insanity'; // Example
+        const startUrl = 'https://novelfire.net/book/shadow-slave'; // Example
 
         console.log(`--- Starting Scraper Run at ${new Date(startTime).toISOString()} ---`);
 
