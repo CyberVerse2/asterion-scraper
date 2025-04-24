@@ -7,6 +7,13 @@ import { Novel, Chapter, INovel, IChapter } from './models/Novel.js'; // Import 
 // Load environment variables from .env file
 dotenv.config();
 
+// --- Configuration ---
+const REQUEST_DELAY_MS = 2000; // Delay between HTTP requests (milliseconds)
+const DB_OPERATION_DELAY_MS = 50; // Smaller delay between DB writes
+
+// --- Helper Functions ---
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 // --- Interfaces & Types ---
 
 interface NovelDetails {
@@ -28,9 +35,6 @@ interface ChapterData {
     title: string;
     content: string | null;
 }
-
-// Utility function for delay
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- Database Connection ---
 
@@ -55,6 +59,7 @@ async function connectDB(): Promise<void> {
 async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
     console.log(`Fetching novel details from: ${novelUrl}`);
     try {
+        await delay(REQUEST_DELAY_MS); // Delay before first request
         const { data } = await axios.get(novelUrl);
         const $ = cheerio.load(data);
 
@@ -86,6 +91,7 @@ async function scrapeChapterContent(
 ): Promise<ChapterData> {
     console.log(`Fetching chapter content from: ${chapterUrl}`);
     try {
+        await delay(REQUEST_DELAY_MS); // Delay before each chapter content request
         const { data } = await axios.get(chapterUrl);
         const $ = cheerio.load(data);
 
@@ -133,6 +139,7 @@ async function scrapeNovel(startUrl: string): Promise<void> {
 
         try {
             console.log(`Fetching latest chapter link from: ${firstPageDescUrl}`);
+            await delay(REQUEST_DELAY_MS); // Delay before chapter list request
             const { data } = await axios.get(firstPageDescUrl);
             const $ = cheerio.load(data);
             const latestChapterLink = $('.chapter-list a').first().attr('href'); // Get the first link
@@ -233,6 +240,7 @@ async function scrapeNovel(startUrl: string): Promise<void> {
                     if (!chapterData.content) continue; // Skip if content is null
 
                     try {
+                        await delay(DB_OPERATION_DELAY_MS); // Small delay before each DB write
                         // Add explicit type annotation here
                         const savedChapter: IChapter | null = await Chapter.findOneAndUpdate(
                             {
