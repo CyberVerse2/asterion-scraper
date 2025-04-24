@@ -191,141 +191,144 @@ async function main() {
             return;
         }
 
-        // 2. Loop through chapters
-        const chaptersBaseUrl = novelDetails.chaptersUrl.split('/chapters')[0];
-        console.log(`\n--- Processing Chapters 1 to ${latestChapterNumber} ---`);
-        const allChaptersData: ChapterData[] = [];
-
-        for (let i = 1; i <= latestChapterNumber; i++) {
-            stats.chaptersAttempted++; // Increment attempt counter
-            const dynamicChapterUrl = `${chaptersBaseUrl}/chapter-${i}`;
+        // --- Save/Update Novel Document First ---
+        let savedNovel: INovel | null = null;
+        if (novelDetails.title) {
+            console.log(`\n--- Finding/Updating ${novelDetails.title} in Database Before Chapter Scraping ---`);
             try {
-                console.log(`Processing Chapter ${i}/${latestChapterNumber}: ${dynamicChapterUrl}`);
-                const chapterData = await scrapeChapterContent(dynamicChapterUrl, i);
-
-                // Check if content was successfully scraped (not null)
-                if (chapterData.content) {
-                    allChaptersData.push(chapterData);
-                    stats.chaptersScrapedSuccess++; // Increment success counter
-                } else {
-                    // Increment counter if scraping function returned null content
-                    stats.chaptersWithEmptyContent++;
-                    console.warn(`Chapter ${i} scraped but content was empty or not found.`);
-                }
-
-                // Optional: Add progress logging every N chapters
-                if (i % 50 === 0) {
-                    console.log(`--- Progress: Scraped up to chapter ${i} ---`);
-                }
-                // Delay is handled within scrapeChapterContent now
-
-            } catch (chapterError) {
-                // This catch might be less likely if scrapeChapterContent handles its own errors,
-                // but keep it for unexpected issues during the call itself.
-                stats.chaptersScrapedError++; // Increment error counter
-                console.error(`Unexpected error processing chapter ${i} (${dynamicChapterUrl}):`, chapterError);
-            }
-        }
-
-        console.log('\n--- Finished Scraping Chapters ---');
-        console.log(`Attempted: ${stats.chaptersAttempted}, Scraped OK: ${stats.chaptersScrapedSuccess}, Empty Content: ${stats.chaptersWithEmptyContent}, Errors: ${stats.chaptersScrapedError}`);
-
-        // --- Save to Database ---
-        if (allChaptersData.length > 0 && novelDetails.title) {
-            console.log(`\n--- Saving/Updating ${novelDetails.title} in Database ---`);
-            let savedNovel: INovel | null = null;
-            try {
-                // 1. Find or Create the Novel document
                 savedNovel = await Novel.findOneAndUpdate(
-                    { title: novelDetails.title }, // Find by unique title
+                    { title: novelDetails.title },
                     {
-                        // Set or update novel details
                         $set: {
                             novelUrl: startUrl,
                             author: novelDetails.author,
                             rank: novelDetails.rank,
-                            totalChapters: novelDetails.chapters, // Use value from site
+                            totalChapters: novelDetails.chapters,
                             views: novelDetails.views,
                             bookmarks: novelDetails.bookmarks,
                             status: novelDetails.status,
                             genres: novelDetails.genres,
                             summary: novelDetails.summary,
                             chaptersUrl: novelDetails.chaptersUrl,
-                            lastScraped: new Date(),
+                            lastScraped: new Date(), // Update last scraped time
                         }
                     },
                     {
-                        upsert: true, // Create if doesn't exist
-                        new: true,    // Return the updated document
-                        setDefaultsOnInsert: true, // Apply default values on insert
+                        upsert: true,
+                        new: true,
+                        setDefaultsOnInsert: true,
                     }
                 );
-
-                if (!savedNovel) {
-                    console.error("Failed to save or find novel document.");
-                    stats.dbErrors++; // Count as DB Error
-                    return; // Exit if novel couldn't be saved/found
+                if (savedNovel) {
+                    stats.dbNovelUpdateSuccess++;
+                    console.log(`Found/Created Novel: ${savedNovel.title} (ID: ${savedNovel._id})`);
+                } else {
+                    console.error("Failed to save or find novel document. Aborting chapter processing.");
+                    stats.dbErrors++;
+                    return; // Cannot proceed without a novel document
                 }
-                stats.dbNovelUpdateSuccess++;
-                console.log(`Found/Created Novel: ${savedNovel.title} (ID: ${savedNovel._id})`);
+            } catch (novelDbError) {
+                stats.dbErrors++;
+                console.error(`Error finding/updating novel document:`, novelDbError);
+                return; // Cannot proceed without a novel document
+            }
+        } else {
+            console.error("Novel title missing, cannot save novel or chapters.");
+            return; // Cannot proceed
+        }
 
-                // 2. Save/Update individual chapters and collect their IDs
-                const chapterIds: mongoose.Schema.Types.ObjectId[] = [];
-                console.log(`Processing ${allChaptersData.length} chapters for saving...`);
+        // 2. Loop through chapters, scrape, and save individually
+        const chaptersBaseUrl = novelDetails.chaptersUrl.split('/chapters')[0];
+        console.log(`\n--- Processing Chapters 1 to ${latestChapterNumber} ---`);
+        const chapterIds: mongoose.Schema.Types.ObjectId[] = []; // Keep track of saved chapter IDs
 
-                for (const chapterData of allChaptersData) {
-                    // Only try to save if we actually got content during scraping
-                    if (!chapterData.content) continue;
+        for (let i = 1; i <= latestChapterNumber; i++) {
+            stats.chaptersAttempted++;
+            const dynamicChapterUrl = `${chaptersBaseUrl}/chapter-${i}`;
+            try {
+                console.log(`Processing Chapter ${i}/${latestChapterNumber}: ${dynamicChapterUrl}`);
+                const chapterData = await scrapeChapterContent(dynamicChapterUrl, i);
 
+                if (chapterData.content) {
+                    stats.chaptersScrapedSuccess++;
+
+                    // --- Save Chapter Immediately ---
                     try {
-                        await delay(DB_OPERATION_DELAY_MS); // Small delay before each DB write
+                        await delay(DB_OPERATION_DELAY_MS); // Small delay before DB write
                         const savedChapter = await Chapter.findOneAndUpdate(
                             {
                                 novel: savedNovel._id, // Link to the novel
-                                chapterNumber: chapterData.chapterNumber // Identify chapter by number within the novel
+                                chapterNumber: chapterData.chapterNumber
                             },
                             {
-                                // Set or update chapter details
                                 $set: {
                                     url: chapterData.url,
                                     title: chapterData.title,
-                                    content: chapterData.content, // Save the scraped HTML
+                                    content: chapterData.content,
                                 }
                             },
                             {
-                                upsert: true, // Create if doesn't exist
-                                new: true,    // Return the updated document
+                                upsert: true,
+                                new: true,
                                 setDefaultsOnInsert: true,
                             }
                         );
                         if (savedChapter) {
                             chapterIds.push(savedChapter._id as mongoose.Schema.Types.ObjectId);
-                            stats.dbChapterUpdateSuccess++; // Increment chapter success
+                            stats.dbChapterUpdateSuccess++;
+                            console.log(`  Saved/Updated Chapter ${savedChapter.chapterNumber} (ID: ${savedChapter._id})`);
                         } else {
-                            console.warn(`  Failed to save/update Chapter ${chapterData.chapterNumber}`);
-                            stats.dbErrors++; // Increment general DB error
+                            console.warn(`  DB op ok, but failed to get Chapter ${chapterData.chapterNumber} doc back.`);
+                            stats.dbErrors++;
                         }
                     } catch (chapterDbError) {
-                        stats.dbErrors++; // Increment DB error counter
-                        console.error(`  Error saving chapter ${chapterData.chapterNumber}:`, chapterDbError);
+                        stats.dbErrors++;
+                        console.error(`  Error saving chapter ${chapterData.chapterNumber} to DB:`, chapterDbError);
                     }
-                }
+                    // -------------------------------
 
-                // 3. Update the Novel document with the array of Chapter IDs
-                if (chapterIds.length > 0) {
-                    savedNovel.chapters = chapterIds;
-                    await savedNovel.save();
-                    console.log(`Successfully updated Novel ${savedNovel.title} with ${chapterIds.length} chapter references.`);
                 } else {
-                    console.log(`No new/updated chapters were successfully saved for ${savedNovel.title}. Novel reference list not updated.`);
+                    stats.chaptersWithEmptyContent++;
+                    console.warn(`Chapter ${i} scraped but content was empty or not found. Skipping save.`);
                 }
 
-            } catch (dbError) {
-                stats.dbErrors++; // Increment DB error counter for main block
-                console.error(`Error during database operations:`, dbError);
+                if (i % 50 === 0) {
+                    console.log(`--- Progress: Processed up to chapter ${i} ---`);
+                }
+
+            } catch (chapterScrapeError) {
+                stats.chaptersScrapedError++;
+                console.error(`Error scraping chapter ${i} (${dynamicChapterUrl}):`, chapterScrapeError);
             }
+        }
+
+        console.log('\n--- Finished Processing Chapters ---');
+        console.log(`Attempted: ${stats.chaptersAttempted}, Scraped OK: ${stats.chaptersScrapedSuccess}, Empty Content: ${stats.chaptersWithEmptyContent}, Scrape Errors: ${stats.chaptersScrapedError}`);
+        console.log(`DB Chapters Saved/Updated: ${stats.dbChapterUpdateSuccess}, DB Errors during save: ${stats.dbErrors}`);
+
+        // --- Update Novel with Chapter List ---
+        if (savedNovel && chapterIds.length > 0) {
+            console.log(`\n--- Updating Novel ${savedNovel.title} with ${chapterIds.length} Chapter References ---`);
+            try {
+                // Check if the chapter list actually changed to avoid unnecessary save
+                const currentChapterIds = savedNovel.chapters.map(id => id.toString());
+                const newChapterIds = chapterIds.map(id => id.toString());
+                // Simple length check or more sophisticated set comparison if needed
+                if (currentChapterIds.length !== newChapterIds.length || !newChapterIds.every(id => currentChapterIds.includes(id))) {
+                    savedNovel.chapters = chapterIds; // Update the list
+                    await savedNovel.save();
+                    console.log(`Successfully updated Novel ${savedNovel.title}.`);
+                } else {
+                    console.log(`Chapter list for Novel ${savedNovel.title} is already up-to-date. No update needed.`);
+                }
+            } catch (novelUpdateError) {
+                stats.dbErrors++; // Count error during final novel save
+                console.error(`Error updating novel ${savedNovel.title} with chapter list:`, novelUpdateError);
+            }
+        } else if (savedNovel) {
+            console.log(`No new chapters were successfully saved for ${savedNovel.title}. Novel reference list not updated.`);
         } else {
-            console.log('No chapters scraped with content or novel title missing, skipping database save.');
+            console.log('Novel document was not available, cannot update chapter list.');
         }
 
     } catch (error) {
