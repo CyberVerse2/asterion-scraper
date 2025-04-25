@@ -2,11 +2,19 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
-import { Novel, Chapter, INovel, IChapter } from './models/Novel.js'; // Import named exports for models and the INovel interface
-import * as fs from 'fs'; // Import fs module
-import * as path from 'path'; // Import path module for joining paths
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
-// Load environment variables from .env file
+// Import models (adjust path if necessary)
+import Novel, { INovel, Chapter, IChapter } from './models/Novel.js';
+
+// Determine __dirname for ES Modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Load environment variables
 dotenv.config();
 
 // --- Configuration ---
@@ -373,7 +381,7 @@ async function main() {
 
             if (highestChapterDoc && highestChapterDoc.chapterNumber) {
               highestChapterNumberInDb = highestChapterDoc.chapterNumber;
-              startChapterNumber = highestChapterNumberInDb + 1;
+              startChapterNumber = highestChapterDoc.chapterNumber + 1;
               console.log(
                 `\nHighest chapter found in DB for ${savedNovel.title}: ${highestChapterNumberInDb}. Resuming scrape from chapter ${startChapterNumber}.`
               );

@@ -11,6 +11,6 @@
     "skipLibCheck": true,                                /* Skip type checking all .d.ts files. */
     "resolveJsonModule": true                         /* Enable importing .json files */
   },
-  "include": ["scraper.ts"],                            /* Specifies an array of filenames or patterns to include in the program. */
-  "exclude": ["node_modules"]                         /* Specifies an array of filenames or patterns that should be skipped when resolving 'include'. */
+  "include": ["**/*.ts"],                            /* Specifies an array of filenames or patterns to include in the program. Updated to include all TS files. */
+  "exclude": ["node_modules", "dist"]             /* Specifies an array of filenames or patterns that should be skipped when resolving 'include'. Added dist to exclude compiled files. */
 }
