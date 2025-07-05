@@ -3,7 +3,8 @@ import mongoose, { Schema, Document } from 'mongoose';
 // --- Interfaces ---
 
 // Interface representing a chapter document
-export interface IChapter extends Document { // Chapters are now separate documents
+export interface IChapter extends Document {
+  // Chapters are now separate documents
   novel: mongoose.Schema.Types.ObjectId; // Reference to the parent Novel
   chapterNumber: number;
   url: string;
@@ -25,6 +26,7 @@ export interface INovel extends Document {
   summary?: string | null;
   chaptersUrl?: string | null; // URL to the chapter list page
   imageUrl?: string; // Added imageUrl field
+  rating?: number | null; // NEW: Novel rating (e.g., 4.9)
   chapters: mongoose.Schema.Types.ObjectId[]; // Array of Chapter ObjectIds
   lastScraped?: Date;
 }
@@ -32,66 +34,83 @@ export interface INovel extends Document {
 // --- Schemas ---
 
 // Schema for Chapter (Separate Collection)
-const ChapterSchema: Schema<IChapter> = new Schema({
-  novel: { // Reference back to the parent Novel
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Novel', // Refers to the 'Novel' model
-    required: true,
-    index: true,
+const ChapterSchema: Schema<IChapter> = new Schema(
+  {
+    novel: {
+      // Reference back to the parent Novel
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Novel', // Refers to the 'Novel' model
+      required: true,
+      index: true
+    },
+    chapterNumber: {
+      type: Number,
+      required: true,
+      index: true // Index for potentially faster sorting/lookup
+    },
+    url: {
+      type: String,
+      required: true,
+      unique: true // URL should be unique per chapter
+    },
+    title: {
+      type: String,
+      required: true
+    },
+    content: {
+      type: String,
+      required: true
+    }
   },
-  chapterNumber: {
-    type: Number,
-    required: true,
-    index: true // Index for potentially faster sorting/lookup
-  },
-  url: {
-    type: String,
-    required: true,
-    unique: true // URL should be unique per chapter
-  },
-  title: {
-    type: String,
-    required: true
-  },
-  content: {
-    type: String,
-    required: true
-  },
-}, { timestamps: true }); // Add timestamps to chapters too
+  { timestamps: true }
+); // Add timestamps to chapters too
 
 // Add a compound index for finding chapters belonging to a novel
 ChapterSchema.index({ novel: 1, chapterNumber: 1 }, { unique: true });
 
 // Schema for Novel (Updated)
-const NovelSchema: Schema<INovel> = new Schema({
-  title: {
-    type: String,
-    required: true,
-    unique: true, // Assumes novel title is unique
-    index: true
+const NovelSchema: Schema<INovel> = new Schema(
+  {
+    title: {
+      type: String,
+      required: true,
+      unique: true, // Assumes novel title is unique
+      index: true
+    },
+    novelUrl: {
+      type: String
+    },
+    author: { type: String },
+    rank: { type: String },
+    totalChapters: { type: String },
+    views: { type: String },
+    bookmarks: { type: String },
+    status: { type: String },
+    genres: [{ type: String }],
+    summary: { type: String },
+    chaptersUrl: { type: String },
+    imageUrl: { type: String }, // Added imageUrl field
+    rating: {
+      // NEW: Novel rating field
+      type: Number,
+      min: 0,
+      max: 10, // Assuming rating scale is 0-10 based on typical novel sites
+      default: null
+    },
+    chapters: [
+      {
+        // Array of references to Chapter documents
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Chapter' // Refers to the 'Chapter' model
+      }
+    ],
+    lastScraped: {
+      type: Date,
+      default: Date.now
+    }
   },
-  novelUrl: {
-    type: String
-  },
-  author: { type: String },
-  rank: { type: String },
-  totalChapters: { type: String },
-  views: { type: String },
-  bookmarks: { type: String },
-  status: { type: String },
-  genres: [{ type: String }],
-  summary: { type: String },
-  chaptersUrl: { type: String },
-  imageUrl: { type: String }, // Added imageUrl field
-  chapters: [{ // Array of references to Chapter documents
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Chapter' // Refers to the 'Chapter' model
-  }],
-  lastScraped: {
-    type: Date,
-    default: Date.now
-  },
-}, { timestamps: true }); // Add createdAt and updatedAt timestamps
+  { timestamps: true }
+); // Add createdAt and updatedAt timestamps
 
 // --- Models ---
 

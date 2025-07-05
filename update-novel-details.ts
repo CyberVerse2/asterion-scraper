@@ -1,0 +1,414 @@
+#!/usr/bin/env node
+
+import axios from 'axios';
+import * as cheerio from 'cheerio';
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+
+// Import models
+import Novel, { INovel } from './models/Novel.js';
+
+// Import shared extraction function
+import { extractNovelDetails } from './utils/novel-details-extractor.js';
+
+// Load environment variables
+dotenv.config();
+
+// --- Configuration ---
+const REQUEST_DELAY_MS = 2000; // 2 seconds between requests to be respectful
+const DB_OPERATION_DELAY_MS = 100; // Small delay between DB operations
+
+// --- Interfaces ---
+interface UpdateStats {
+  totalNovels: number;
+  novelsProcessed: number;
+  summariesUpdated: number;
+  ratingsUpdated: number;
+  stillMissingSummaries: number;
+  stillMissingRatings: number;
+  errors: number;
+  skippedNoUrl: number;
+  startTime: number;
+  endTime: number;
+  durationSeconds: number;
+}
+
+interface CliOptions {
+  dryRun: boolean;
+  limit?: number;
+  summariesOnly: boolean;
+  ratingsOnly: boolean;
+  verbose: boolean;
+}
+
+// --- Utility Functions ---
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Parse command line arguments
+ */
+function parseCliArgs(): CliOptions {
+  const args = process.argv.slice(2);
+
+  const options: CliOptions = {
+    dryRun: false,
+    summariesOnly: false,
+    ratingsOnly: false,
+    verbose: false
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+
+    switch (arg) {
+      case '--dry-run':
+        options.dryRun = true;
+        break;
+      case '--limit':
+        const limitValue = parseInt(args[i + 1]);
+        if (!isNaN(limitValue) && limitValue > 0) {
+          options.limit = limitValue;
+          i++; // Skip next argument since it's the limit value
+        } else {
+          console.error('Error: --limit requires a positive integer');
+          process.exit(1);
+        }
+        break;
+      case '--summaries-only':
+        options.summariesOnly = true;
+        break;
+      case '--ratings-only':
+        options.ratingsOnly = true;
+        break;
+      case '--verbose':
+        options.verbose = true;
+        break;
+      case '--help':
+        showHelp();
+        process.exit(0);
+      default:
+        if (arg.startsWith('--')) {
+          console.error(`Error: Unknown option ${arg}`);
+          showHelp();
+          process.exit(1);
+        }
+    }
+  }
+
+  // Validate conflicting options
+  if (options.summariesOnly && options.ratingsOnly) {
+    console.error('Error: Cannot use both --summaries-only and --ratings-only');
+    process.exit(1);
+  }
+
+  return options;
+}
+
+/**
+ * Show help message
+ */
+function showHelp() {
+  console.log(`
+Usage: node update-novel-details.js [options]
+
+Update missing summaries and/or ratings for novels in the database.
+
+Options:
+  --dry-run          Show what would be updated without making changes
+  --limit N          Process only N novels (useful for testing)
+  --summaries-only   Only update missing summaries
+  --ratings-only     Only update missing ratings
+  --verbose          Enable detailed logging
+  --help             Show this help message
+
+Examples:
+  node update-novel-details.js --dry-run --limit 5
+  node update-novel-details.js --summaries-only
+  node update-novel-details.js --ratings-only --verbose
+  node update-novel-details.js --limit 10
+`);
+}
+
+// --- Database Functions ---
+async function connectDB(): Promise<void> {
+  if (!process.env.MONGODB_URI) {
+    console.error('Error: MONGODB_URI is not defined in .env file');
+    process.exit(1);
+  }
+
+  try {
+    await mongoose.connect(process.env.MONGODB_URI);
+    console.log('MongoDB Connected successfully.');
+  } catch (err) {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  }
+}
+
+/**
+ * Find novels with missing summaries and/or ratings
+ */
+async function findNovelsWithMissingData(options: CliOptions): Promise<INovel[]> {
+  let query: any = {};
+
+  if (options.summariesOnly) {
+    // Only novels missing summaries
+    query = {
+      $or: [{ summary: null }, { summary: '' }, { summary: { $exists: false } }]
+    };
+  } else if (options.ratingsOnly) {
+    // Only novels missing ratings
+    query = {
+      $or: [{ rating: null }, { rating: { $exists: false } }]
+    };
+  } else {
+    // Novels missing either summary OR rating
+    query = {
+      $or: [
+        { summary: null },
+        { summary: '' },
+        { summary: { $exists: false } },
+        { rating: null },
+        { rating: { $exists: false } }
+      ]
+    };
+  }
+
+  let novelsQuery = Novel.find(query).select('title novelUrl summary rating');
+
+  if (options.limit) {
+    novelsQuery = novelsQuery.limit(options.limit);
+  }
+
+  const novels = await novelsQuery.exec();
+  return novels;
+}
+
+/**
+ * Update a single novel with missing details
+ */
+async function updateNovelDetails(
+  novel: INovel,
+  options: CliOptions,
+  stats: UpdateStats
+): Promise<void> {
+  const missingData = [];
+  const needsSummary = !novel.summary || novel.summary.trim() === '';
+  const needsRating = novel.rating === null || novel.rating === undefined;
+
+  if (needsSummary && !options.ratingsOnly) {
+    missingData.push('summary');
+  }
+  if (needsRating && !options.summariesOnly) {
+    missingData.push('rating');
+  }
+
+  if (missingData.length === 0) {
+    if (options.verbose) {
+      console.log(`  ℹ️  Novel "${novel.title}" already has all required data`);
+    }
+    return;
+  }
+
+  if (!novel.novelUrl) {
+    console.warn(`  ⚠️  Novel "${novel.title}" has no URL, skipping`);
+    stats.skippedNoUrl++;
+    return;
+  }
+
+  console.log(`  → Processing: "${novel.title}" (missing: ${missingData.join(', ')})`);
+
+  try {
+    // Add delay before request
+    await delay(REQUEST_DELAY_MS);
+
+    // Fetch the novel page
+    const { data } = await axios.get(novel.novelUrl);
+    const $ = cheerio.load(data);
+
+    // Extract details using shared function
+    const extractedDetails = extractNovelDetails($);
+
+    // Prepare update object
+    const updateData: any = {};
+    let updatedFields = [];
+
+    // Handle summary update
+    if (needsSummary && !options.ratingsOnly && extractedDetails.summary.value) {
+      updateData.summary = extractedDetails.summary.value;
+      updatedFields.push('summary');
+      stats.summariesUpdated++;
+
+      if (options.verbose) {
+        console.log(`    ✓ Found summary using selector: ${extractedDetails.summary.selector}`);
+      }
+    } else if (needsSummary && !options.ratingsOnly) {
+      stats.stillMissingSummaries++;
+      if (options.verbose) {
+        console.log(`    ! Still no summary found`);
+      }
+    }
+
+    // Handle rating update
+    if (needsRating && !options.summariesOnly && extractedDetails.rating.value !== null) {
+      updateData.rating = extractedDetails.rating.value;
+      updatedFields.push('rating');
+      stats.ratingsUpdated++;
+
+      if (options.verbose) {
+        console.log(
+          `    ✓ Found rating using selector: ${extractedDetails.rating.selector} (value: ${extractedDetails.rating.value})`
+        );
+      }
+    } else if (needsRating && !options.summariesOnly) {
+      stats.stillMissingRatings++;
+      if (options.verbose) {
+        console.log(`    ! Still no rating found`);
+      }
+    }
+
+    // Update database if not dry run and we have data to update
+    if (Object.keys(updateData).length > 0) {
+      if (options.dryRun) {
+        console.log(
+          `    [DRY RUN] Would update ${updatedFields.join(' and ')} for "${novel.title}"`
+        );
+      } else {
+        await delay(DB_OPERATION_DELAY_MS);
+        await Novel.updateOne({ _id: novel._id }, { $set: updateData });
+        console.log(`    ✅ Updated ${updatedFields.join(' and ')} for "${novel.title}"`);
+      }
+    } else {
+      if (options.verbose) {
+        console.log(`    ℹ️  No new data found for "${novel.title}"`);
+      }
+    }
+  } catch (error) {
+    stats.errors++;
+    console.error(
+      `    ❌ Error processing "${novel.title}":`,
+      error instanceof Error ? error.message : error
+    );
+  }
+}
+
+// --- Main Function ---
+async function main() {
+  const startTime = Date.now();
+
+  // Parse CLI arguments
+  const options = parseCliArgs();
+
+  console.log('🚀 Novel Details Update Script');
+  console.log('================================');
+
+  if (options.dryRun) {
+    console.log('🔍 DRY RUN MODE - No changes will be made to the database');
+  }
+
+  if (options.summariesOnly) {
+    console.log('📝 Updating only missing summaries');
+  } else if (options.ratingsOnly) {
+    console.log('⭐ Updating only missing ratings');
+  } else {
+    console.log('📝⭐ Updating missing summaries and ratings');
+  }
+
+  if (options.limit) {
+    console.log(`📊 Processing limited to ${options.limit} novels`);
+  }
+
+  console.log('');
+
+  // Initialize stats
+  const stats: UpdateStats = {
+    totalNovels: 0,
+    novelsProcessed: 0,
+    summariesUpdated: 0,
+    ratingsUpdated: 0,
+    stillMissingSummaries: 0,
+    stillMissingRatings: 0,
+    errors: 0,
+    skippedNoUrl: 0,
+    startTime,
+    endTime: 0,
+    durationSeconds: 0
+  };
+
+  try {
+    // Connect to database
+    await connectDB();
+
+    // Find novels with missing data
+    console.log('🔍 Finding novels with missing data...');
+    const novels = await findNovelsWithMissingData(options);
+    stats.totalNovels = novels.length;
+
+    if (novels.length === 0) {
+      console.log('✅ No novels found with missing data. All novels are up to date!');
+      return;
+    }
+
+    console.log(`📚 Found ${novels.length} novel(s) with missing data`);
+    console.log('');
+
+    // Process each novel
+    for (let i = 0; i < novels.length; i++) {
+      const novel = novels[i];
+      console.log(`Processing ${i + 1}/${novels.length}: "${novel.title}"`);
+
+      await updateNovelDetails(novel, options, stats);
+      stats.novelsProcessed++;
+
+      // Add small delay between novels
+      if (i < novels.length - 1) {
+        await delay(500); // Short delay between novels
+      }
+
+      console.log(''); // Empty line for readability
+    }
+  } catch (error) {
+    console.error('❌ Fatal error during script execution:', error);
+    process.exit(1);
+  } finally {
+    // Calculate final stats
+    stats.endTime = Date.now();
+    stats.durationSeconds = (stats.endTime - stats.startTime) / 1000;
+
+    // Print final summary
+    console.log('');
+    console.log('📊 UPDATE SUMMARY');
+    console.log('=================');
+    console.log(`⏱️  Duration: ${stats.durationSeconds.toFixed(2)} seconds`);
+    console.log(`📚 Total novels found: ${stats.totalNovels}`);
+    console.log(`✅ Novels processed: ${stats.novelsProcessed}`);
+    console.log(`📝 Summaries updated: ${stats.summariesUpdated}`);
+    console.log(`⭐ Ratings updated: ${stats.ratingsUpdated}`);
+
+    if (!options.ratingsOnly) {
+      console.log(`📝❌ Still missing summaries: ${stats.stillMissingSummaries}`);
+    }
+    if (!options.summariesOnly) {
+      console.log(`⭐❌ Still missing ratings: ${stats.stillMissingRatings}`);
+    }
+
+    console.log(`⚠️  Novels skipped (no URL): ${stats.skippedNoUrl}`);
+    console.log(`❌ Errors encountered: ${stats.errors}`);
+
+    if (options.dryRun) {
+      console.log('');
+      console.log('ℹ️  This was a dry run. No changes were made to the database.');
+      console.log('   Remove --dry-run to actually update the novels.');
+    }
+
+    // Close database connection
+    await mongoose.disconnect();
+    console.log('');
+    console.log('👋 Database connection closed. Script complete!');
+  }
+}
+
+// Run the script
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch(console.error);
+}

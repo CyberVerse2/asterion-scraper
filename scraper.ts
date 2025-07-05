@@ -10,6 +10,9 @@ import { dirname } from 'path';
 // Import models (adjust path if necessary)
 import Novel, { INovel, Chapter, IChapter } from './models/Novel.js';
 
+// Import shared extraction function
+import { extractNovelDetailsSimple } from './utils/novel-details-extractor.js';
+
 // Determine __dirname for ES Modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -38,6 +41,7 @@ interface NovelDetails {
   summary: string | null;
   chaptersUrl: string | null;
   imageUrl: string | null; // Added imageUrl field
+  rating: number | null; // NEW: Novel rating field
 }
 
 interface ChapterLink {
@@ -86,7 +90,12 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
     const genres = $('.categories ul a')
       .map((i, el) => $(el).text().trim())
       .get();
-    const summary = $('.summary .introduce .inner').text().trim() || null;
+
+    // Use shared extraction function for summary and rating with enhanced fallback logic
+    const extractedDetails = extractNovelDetailsSimple($);
+    const summary = extractedDetails.summary;
+    const rating = extractedDetails.rating;
+
     let chaptersUrl = $('a.chapter-latest-container').attr('href') || null;
     let imageUrl =
       $('figure.cover img.lazy').attr('data-src') || $('figure.cover img.lazy').attr('src') || null; // Get data-src or src
@@ -114,7 +123,8 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
       genres,
       summary,
       chaptersUrl,
-      imageUrl
+      imageUrl,
+      rating // NEW: Include rating in return object
     };
   } catch (error: unknown) {
     console.error(`Error fetching or parsing novel details from ${novelUrl}:`, error);
@@ -130,7 +140,8 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
       genres: [],
       summary: null,
       chaptersUrl: null,
-      imageUrl: null
+      imageUrl: null,
+      rating: null // NEW: Include rating in error case
     };
   }
 }
@@ -349,6 +360,7 @@ async function main() {
                 summary: novelDetails.summary,
                 chaptersUrl: novelDetails.chaptersUrl,
                 imageUrl: novelDetails.imageUrl,
+                rating: novelDetails.rating, // NEW: Save rating to database
                 lastScraped: new Date() // Update last scraped time
               }
             },
