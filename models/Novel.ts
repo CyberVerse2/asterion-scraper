@@ -31,6 +31,16 @@ export interface IChapter {
   updatedAt: Date;
 }
 
+export interface IChapterListItem {
+  _id: number;
+  novelId: number;
+  chapterNumber: number;
+  url: string;
+  title: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface NovelUpdatePayload {
   title: string;
   author: string | null;
@@ -50,6 +60,11 @@ export interface NovelUpdatePayload {
 export interface ListOptions {
   limit?: number;
   offset?: number;
+}
+
+export interface PaginatedResult<T> {
+  data: T[];
+  total: number;
 }
 
 let pool: Pool;
@@ -97,6 +112,18 @@ function mapChapterRow(row: any): IChapter {
   };
 }
 
+function mapChapterListRow(row: any): IChapterListItem {
+  return {
+    _id: row.id,
+    novelId: row.novel_id,
+    chapterNumber: row.chapter_number,
+    url: row.url,
+    title: row.title,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 async function initializeSchema(): Promise<void> {
   if (schemaInitialized) {
     return;
@@ -137,6 +164,10 @@ async function initializeSchema(): Promise<void> {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (novel_id, chapter_number)
     );
+  `);
+
+  await getPool().query(`
+    CREATE INDEX IF NOT EXISTS idx_chapters_novel_id ON chapters (novel_id);
   `);
 
   schemaInitialized = true;
@@ -217,7 +248,9 @@ export async function upsertNovelByUrl(
   return mapNovelRow(result.rows[0]);
 }
 
-export async function listNovels(options: ListOptions & { search?: string }): Promise<INovel[]> {
+export async function listNovels(
+  options: ListOptions & { search?: string }
+): Promise<PaginatedResult<INovel>> {
   const values: Array<string | number> = [];
   const conditions: string[] = [];
 
@@ -228,19 +261,29 @@ export async function listNovels(options: ListOptions & { search?: string }): Pr
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
+  const countResult = await getPool().query(
+    `
+      SELECT COUNT(*)::BIGINT AS total
+      FROM novels
+      ${whereClause}
+    `,
+    values
+  );
+
+  const listValues = [...values];
   let limitClause = '';
   if (options.limit !== undefined) {
-    values.push(options.limit);
-    limitClause = `LIMIT $${values.length}`;
+    listValues.push(options.limit);
+    limitClause = `LIMIT $${listValues.length}`;
   }
 
   let offsetClause = '';
   if (options.offset !== undefined) {
-    values.push(options.offset);
-    offsetClause = `OFFSET $${values.length}`;
+    listValues.push(options.offset);
+    offsetClause = `OFFSET $${listValues.length}`;
   }
 
-  const result = await getPool().query(
+  const rowsResult = await getPool().query(
     `
       SELECT *
       FROM novels
@@ -249,10 +292,13 @@ export async function listNovels(options: ListOptions & { search?: string }): Pr
       ${limitClause}
       ${offsetClause}
     `,
-    values
+    listValues
   );
 
-  return result.rows.map(mapNovelRow);
+  return {
+    data: rowsResult.rows.map(mapNovelRow),
+    total: Number(countResult.rows[0]?.total ?? 0)
+  };
 }
 
 export async function getNovelById(novelId: number): Promise<INovel | null> {
@@ -322,34 +368,48 @@ export async function upsertChapter(
 export async function listChaptersByNovelId(
   novelId: number,
   options: ListOptions
-): Promise<IChapter[]> {
+): Promise<PaginatedResult<IChapterListItem>> {
   const values: number[] = [novelId];
+
+  const countResult = await getPool().query(
+    `
+      SELECT COUNT(*)::BIGINT AS total
+      FROM chapters
+      WHERE novel_id = $1
+    `,
+    values
+  );
+
+  const listValues = [...values];
 
   let limitClause = '';
   if (options.limit !== undefined) {
-    values.push(options.limit);
-    limitClause = `LIMIT $${values.length}`;
+    listValues.push(options.limit);
+    limitClause = `LIMIT $${listValues.length}`;
   }
 
   let offsetClause = '';
   if (options.offset !== undefined) {
-    values.push(options.offset);
-    offsetClause = `OFFSET $${values.length}`;
+    listValues.push(options.offset);
+    offsetClause = `OFFSET $${listValues.length}`;
   }
 
   const result = await getPool().query(
     `
-      SELECT *
+      SELECT id, novel_id, chapter_number, url, title, created_at, updated_at
       FROM chapters
       WHERE novel_id = $1
       ORDER BY chapter_number ASC
       ${limitClause}
       ${offsetClause}
     `,
-    values
+    listValues
   );
 
-  return result.rows.map(mapChapterRow);
+  return {
+    data: result.rows.map(mapChapterListRow),
+    total: Number(countResult.rows[0]?.total ?? 0)
+  };
 }
 
 export async function getChapterById(chapterId: number): Promise<IChapter | null> {

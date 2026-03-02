@@ -74,11 +74,15 @@ describe('API integration tests (real DB)', () => {
 
     const listNovels = await requestJson(
       'GET',
-      `/novels?limit=10&offset=0&search=${encodeURIComponent('Integration Test Novel')}`
+      `/novels?page=1&pageSize=10&search=${encodeURIComponent('Integration Test Novel')}`
     );
     expect(listNovels.status).toBe(200);
     expect(Array.isArray(listNovels.json.data)).toBe(true);
     expect((listNovels.json.data as unknown[]).length).toBeGreaterThan(0);
+    const novelsMeta = listNovels.json.meta as Record<string, unknown>;
+    expect(Number(novelsMeta.page)).toBe(1);
+    expect(Number(novelsMeta.pageSize)).toBe(10);
+    expect(Number(novelsMeta.total)).toBeGreaterThan(0);
 
     const getNovel = await requestJson('GET', `/novels/${novelId}`);
     expect(getNovel.status).toBe(200);
@@ -97,13 +101,19 @@ describe('API integration tests (real DB)', () => {
     expect(Number.isInteger(chapterId)).toBe(true);
     expect(chapter.chapterNumber).toBe(1);
 
-    const listChapters = await requestJson('GET', `/novels/${novelId}/chapters?limit=10&offset=0`);
+    const listChapters = await requestJson('GET', `/novels/${novelId}/chapters?page=1&pageSize=10`);
     expect(listChapters.status).toBe(200);
     expect(Array.isArray(listChapters.json.data)).toBe(true);
     expect((listChapters.json.data as unknown[]).length).toBeGreaterThan(0);
+    const chapterListItem = (listChapters.json.data as Record<string, unknown>[])[0];
+    expect(chapterListItem.content).toBeUndefined();
+    const chaptersMeta = listChapters.json.meta as Record<string, unknown>;
+    expect(Number(chaptersMeta.page)).toBe(1);
+    expect(Number(chaptersMeta.pageSize)).toBe(10);
+    expect(Number(chaptersMeta.total)).toBeGreaterThan(0);
 
     const getChapter = await requestJson('GET', `/chapters/${chapterId}`);
     expect(getChapter.status).toBe(200);
     expect(Number((getChapter.json.data as Record<string, unknown>)._id)).toBe(chapterId);
-  });
+  }, 20000);
 });

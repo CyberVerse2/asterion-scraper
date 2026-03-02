@@ -20,10 +20,17 @@ const MAX_LIMIT = 100;
 type JsonRecord = Record<string, unknown>;
 
 export interface ApiDependencies {
-  listNovels: (options: { limit?: number; offset?: number; search?: string }) => Promise<unknown[]>;
+  listNovels: (options: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+  }) => Promise<{ data: unknown[]; total: number }>;
   getNovelById: (novelId: number) => Promise<unknown | null>;
   upsertNovelByUrl: (novelUrl: string, payload: NovelUpdatePayload) => Promise<unknown | null>;
-  listChaptersByNovelId: (novelId: number, options: { limit?: number; offset?: number }) => Promise<unknown[]>;
+  listChaptersByNovelId: (
+    novelId: number,
+    options: { limit?: number; offset?: number }
+  ) => Promise<{ data: unknown[]; total: number }>;
   upsertChapter: (
     novelId: number,
     chapter: { chapterNumber: number; url: string; title: string; content: string }
@@ -71,9 +78,53 @@ function parseNonNegativeInt(value: string): number | null {
 
 function parseListOptions(
   searchParams: URLSearchParams
-): { options?: { limit?: number; offset?: number }; error?: string } {
+): {
+  options?: {
+    limit?: number;
+    offset?: number;
+    page: number;
+    pageSize: number;
+  };
+  error?: string;
+} {
+  const rawPage = searchParams.get('page');
+  const rawPageSize = searchParams.get('pageSize');
   const rawLimit = searchParams.get('limit');
   const rawOffset = searchParams.get('offset');
+  const isPageBased = rawPage !== null || rawPageSize !== null;
+
+  if (isPageBased && (rawLimit !== null || rawOffset !== null)) {
+    return { error: 'Use either "page/pageSize" or "limit/offset", not both.' };
+  }
+
+  if (isPageBased) {
+    let page = 1;
+    if (rawPage !== null) {
+      const parsedPage = parsePositiveInt(rawPage);
+      if (parsedPage === null) {
+        return { error: 'Query param "page" must be a positive integer.' };
+      }
+      page = parsedPage;
+    }
+
+    let pageSize = DEFAULT_LIMIT;
+    if (rawPageSize !== null) {
+      const parsedPageSize = parsePositiveInt(rawPageSize);
+      if (parsedPageSize === null) {
+        return { error: 'Query param "pageSize" must be a positive integer.' };
+      }
+      pageSize = Math.min(parsedPageSize, MAX_LIMIT);
+    }
+
+    return {
+      options: {
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+        page,
+        pageSize
+      }
+    };
+  }
 
   let limit = DEFAULT_LIMIT;
   if (rawLimit !== null) {
@@ -93,7 +144,14 @@ function parseListOptions(
     offset = parsedOffset;
   }
 
-  return { options: { limit, offset } };
+  return {
+    options: {
+      limit,
+      offset,
+      page: Math.floor(offset / limit) + 1,
+      pageSize: limit
+    }
+  };
 }
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
@@ -225,15 +283,24 @@ export function createApiHandler(deps: ApiDependencies = defaultDependencies) {
         }
 
         const searchQuery = url.searchParams.get('search')?.trim();
-        const novels = await deps.listNovels({
+        const novelsResult = await deps.listNovels({
           ...options,
           search: searchQuery ? searchQuery : undefined
         });
 
+        const total = novelsResult.total;
+        const pageSize = options.pageSize;
+
         return jsonResponse(200, {
-          data: novels,
+          data: novelsResult.data,
           meta: {
-            count: novels.length,
+            count: novelsResult.data.length,
+            total,
+            page: options.page,
+            pageSize,
+            totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
+            hasNextPage: (options.offset ?? 0) + novelsResult.data.length < total,
+            hasPreviousPage: options.page > 1,
             limit: options.limit ?? DEFAULT_LIMIT,
             offset: options.offset ?? 0
           }
@@ -282,12 +349,21 @@ export function createApiHandler(deps: ApiDependencies = defaultDependencies) {
           return jsonResponse(400, { error });
         }
 
-        const chapters = await deps.listChaptersByNovelId(novelId, options);
+        const chaptersResult = await deps.listChaptersByNovelId(novelId, options);
+        const total = chaptersResult.total;
+        const pageSize = options.pageSize;
+
         return jsonResponse(200, {
-          data: chapters,
+          data: chaptersResult.data,
           meta: {
             novelId,
-            count: chapters.length,
+            count: chaptersResult.data.length,
+            total,
+            page: options.page,
+            pageSize,
+            totalPages: total === 0 ? 0 : Math.ceil(total / pageSize),
+            hasNextPage: (options.offset ?? 0) + chaptersResult.data.length < total,
+            hasPreviousPage: options.page > 1,
             limit: options.limit ?? DEFAULT_LIMIT,
             offset: options.offset ?? 0
           }

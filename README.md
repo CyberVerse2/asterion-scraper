@@ -134,14 +134,22 @@ Example response:
 `GET /novels`
 
 Query params:
+- `page` (optional, positive integer, default `1`)
+- `pageSize` (optional, positive integer, default `25`, max `100`)
 - `limit` (optional, positive integer, default `25`, max `100`)
 - `offset` (optional, non-negative integer, default `0`)
 - `search` (optional, case-insensitive match on `title` or `author`)
 
+Pagination supports both styles:
+- Page-based: `page` + `pageSize`
+- Offset-based: `limit` + `offset`
+
+Do not mix the two styles in the same request.
+
 Example:
 
 ```bash
-curl -s "http://localhost:3000/novels?limit=10&offset=0&search=shadow"
+curl -s "http://localhost:3000/novels?page=1&pageSize=10&search=shadow"
 ```
 
 Example response:
@@ -171,6 +179,12 @@ Example response:
   ],
   "meta": {
     "count": 1,
+    "total": 1,
+    "page": 1,
+    "pageSize": 10,
+    "totalPages": 1,
+    "hasNextPage": false,
+    "hasPreviousPage": false,
     "limit": 10,
     "offset": 0
   }
@@ -228,16 +242,22 @@ curl -s -X POST http://localhost:3000/novels \
 `GET /novels/:id/chapters`
 
 Query params:
+- `page` (optional, positive integer, default `1`)
+- `pageSize` (optional, positive integer, default `25`, max `100`)
 - `limit` (optional, positive integer, default `25`, max `100`)
 - `offset` (optional, non-negative integer, default `0`)
+
+Pagination supports both styles, but they cannot be mixed in one request.
 
 Example:
 
 ```bash
-curl -s "http://localhost:3000/novels/1/chapters?limit=20&offset=0"
+curl -s "http://localhost:3000/novels/1/chapters?page=1&pageSize=20"
 ```
 
 If novel does not exist, returns `404`.
+
+`GET /novels/:id/chapters` returns lightweight chapter list items (no `content` field) for faster responses. Use `GET /chapters/:id` to fetch full chapter content.
 
 #### Create or Update Chapter (Upsert)
 
