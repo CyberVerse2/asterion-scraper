@@ -1,0 +1,21 @@
+--- Scraper Run Finished ---
+Timestamp: 2025-08-05T15:13:24.876Z
+Total Duration: 8488.25 seconds
+
+--- URLs --- 
+URLs Attempted:   68
+
+--- Novels ---
+Novels Processed (DB OK): 36
+Novels Skipped/Failed: 32
+
+--- Chapters ---
+Total Chapters Attempted:  472
+  - Scraped Successfully:  451
+  - Scraped Empty/Miss:    21
+  - Scrape Errors:         0
+
+--- Database Operations ---
+DB Novel Updates OK:   36
+DB Chapter Updates OK: 438
+Total Database Errors: 18
