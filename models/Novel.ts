@@ -47,9 +47,15 @@ export interface NovelUpdatePayload {
   lastScraped: Date;
 }
 
-const connectionString = process.env.DATABASE_URL;
-const pool = new Pool(connectionString ? { connectionString } : undefined);
+let pool: Pool;
 let schemaInitialized = false;
+
+function getPool(): Pool {
+  if (!pool) {
+    pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  }
+  return pool;
+}
 
 function mapNovelRow(row: any): INovel {
   return {
@@ -91,7 +97,7 @@ async function initializeSchema(): Promise<void> {
     return;
   }
 
-  await pool.query(`
+  await getPool().query(`
     CREATE TABLE IF NOT EXISTS novels (
       id BIGSERIAL PRIMARY KEY,
       title TEXT NOT NULL,
@@ -114,7 +120,7 @@ async function initializeSchema(): Promise<void> {
     );
   `);
 
-  await pool.query(`
+  await getPool().query(`
     CREATE TABLE IF NOT EXISTS chapters (
       id BIGSERIAL PRIMARY KEY,
       novel_id BIGINT NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
@@ -147,14 +153,14 @@ export async function connectDB(): Promise<void> {
 }
 
 export async function disconnectDB(): Promise<void> {
-  await pool.end();
+  await getPool().end();
 }
 
 export async function upsertNovelByUrl(
   novelUrl: string,
   payload: NovelUpdatePayload
 ): Promise<INovel | null> {
-  const result = await pool.query(
+  const result = await getPool().query(
     `
       INSERT INTO novels (
         title, novel_url, author, rank, total_chapters, views, bookmarks, status,
@@ -209,7 +215,7 @@ export async function upsertNovelByUrl(
 export async function getHighestChapterForNovel(
   novelId: number
 ): Promise<{ chapterNumber: number } | null> {
-  const result = await pool.query(
+  const result = await getPool().query(
     `
       SELECT chapter_number
       FROM chapters
@@ -231,7 +237,7 @@ export async function upsertChapter(
   novelId: number,
   chapter: { chapterNumber: number; url: string; title: string; content: string }
 ): Promise<IChapter | null> {
-  const result = await pool.query(
+  const result = await getPool().query(
     `
       INSERT INTO chapters (novel_id, chapter_number, url, title, content)
       VALUES ($1, $2, $3, $4, $5)
@@ -273,7 +279,7 @@ export async function findNovelsMissingData(options: {
     limitClause = `LIMIT $${values.length}`;
   }
 
-  const result = await pool.query(
+  const result = await getPool().query(
     `
       SELECT *
       FROM novels
@@ -308,7 +314,7 @@ export async function updateNovelFields(
   }
 
   values.push(novelId);
-  await pool.query(
+  await getPool().query(
     `
       UPDATE novels
       SET ${updates.join(', ')}, updated_at = NOW()

@@ -82,7 +82,9 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
 
     let chaptersUrl = $('a.chapter-latest-container').attr('href') || null;
     let imageUrl =
-      $('figure.cover img.lazy').attr('data-src') || $('figure.cover img.lazy').attr('src') || null;
+      $('figure.cover img').attr('src') ||
+      $('figure.cover img').attr('data-src') ||
+      null;
 
     // Ensure chaptersUrl is absolute
     if (chaptersUrl && !chaptersUrl.startsWith('http')) {
