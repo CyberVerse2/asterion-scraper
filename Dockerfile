@@ -16,4 +16,4 @@ COPY . .
 ENV NODE_ENV=production
 EXPOSE 3000
 
-CMD ["bun", "run", "api.ts"]
+CMD ["sh", "-c", "node --loader ts-node/esm scraper.ts & bun run api.ts"]
