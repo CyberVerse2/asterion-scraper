@@ -30,15 +30,21 @@ const REQUEST_DELAY_MS = 2000; // Delay between HTTP requests (milliseconds)
 const DB_OPERATION_DELAY_MS = 50; // Smaller delay between DB writes
 const INTER_NOVEL_DELAY_MS = 5000; // Delay in ms between processing different novels (e.g., 5 seconds)
 const MAX_HTTP_ATTEMPTS = 4;
+const SESSION_WARMUP_PATHS = ['/', '/latest-release-novels'];
+
+const BROWSER_USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
+];
 
 // --- Helper Functions ---
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const cookieJar = new Map<string, string>();
 
 const httpClient = axios.create({
   timeout: 30000,
   headers: {
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
     Accept:
       'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
@@ -52,6 +58,84 @@ function shouldRetryStatus(status?: number): boolean {
   return status === 403 || status === 429 || (status !== undefined && status >= 500);
 }
 
+function getRandomUserAgent(): string {
+  const randomIndex = Math.floor(Math.random() * BROWSER_USER_AGENTS.length);
+  return BROWSER_USER_AGENTS[randomIndex];
+}
+
+function storeCookies(setCookieHeader: string[] | undefined): void {
+  if (!setCookieHeader || setCookieHeader.length === 0) {
+    return;
+  }
+
+  for (const rawCookie of setCookieHeader) {
+    const firstPart = rawCookie.split(';', 1)[0];
+    const separatorIndex = firstPart.indexOf('=');
+    if (separatorIndex <= 0) {
+      continue;
+    }
+    const cookieName = firstPart.slice(0, separatorIndex).trim();
+    const cookieValue = firstPart.slice(separatorIndex + 1).trim();
+    if (!cookieName) {
+      continue;
+    }
+    cookieJar.set(cookieName, cookieValue);
+  }
+}
+
+function buildCookieHeader(): string | undefined {
+  if (cookieJar.size === 0) {
+    return undefined;
+  }
+  return Array.from(cookieJar.entries())
+    .map(([name, value]) => `${name}=${value}`)
+    .join('; ');
+}
+
+function buildRequestHeaders(targetUrl: string, attempt: number): Record<string, string> {
+  const targetOrigin = new URL(targetUrl).origin;
+  const cookieHeader = buildCookieHeader();
+  const headers: Record<string, string> = {
+    'User-Agent': getRandomUserAgent(),
+    Accept:
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cache-Control': 'no-cache',
+    Pragma: 'no-cache',
+    Referer: targetOrigin,
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': attempt === 1 ? 'none' : 'same-origin',
+    'Sec-Fetch-User': '?1'
+  };
+
+  if (cookieHeader) {
+    headers.Cookie = cookieHeader;
+  }
+
+  return headers;
+}
+
+async function warmupSession(targetUrl: string): Promise<void> {
+  const origin = new URL(targetUrl).origin;
+  for (const sessionPath of SESSION_WARMUP_PATHS) {
+    const warmupUrl = `${origin}${sessionPath}`;
+    try {
+      const response = await httpClient.get(warmupUrl, {
+        headers: {
+          ...buildRequestHeaders(warmupUrl, 1),
+          Referer: origin
+        }
+      });
+      storeCookies(response.headers['set-cookie']);
+      await delay(250);
+    } catch (error) {
+      logAxiosError(`Session warmup request failed for ${warmupUrl}`, error);
+    }
+  }
+}
+
 function logAxiosError(context: string, error: unknown): void {
   if (axios.isAxiosError(error)) {
     console.error(`${context} (status: ${error.response?.status ?? 'unknown'}): ${error.message}`);
@@ -61,9 +145,14 @@ function logAxiosError(context: string, error: unknown): void {
 }
 
 async function fetchPageHtml(url: string): Promise<string> {
+  await warmupSession(url);
+
   for (let attempt = 1; attempt <= MAX_HTTP_ATTEMPTS; attempt++) {
     try {
-      const response = await httpClient.get<string>(url);
+      const response = await httpClient.get<string>(url, {
+        headers: buildRequestHeaders(url, attempt)
+      });
+      storeCookies(response.headers['set-cookie']);
       return response.data;
     } catch (error) {
       const status = axios.isAxiosError(error) ? error.response?.status : undefined;
@@ -71,7 +160,11 @@ async function fetchPageHtml(url: string): Promise<string> {
       if (!shouldRetry) {
         throw error;
       }
-      const backoffMs = 1500 * attempt;
+      if (status === 403) {
+        await warmupSession(url);
+      }
+      const jitterMs = Math.floor(Math.random() * 750);
+      const backoffMs = 1500 * attempt + jitterMs;
       console.warn(
         `Request failed for ${url} with status ${status ?? 'unknown'} (attempt ${attempt}/${MAX_HTTP_ATTEMPTS}). Retrying in ${backoffMs}ms...`
       );
