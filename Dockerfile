@@ -2,7 +2,7 @@ FROM oven/bun:1 AS base
 WORKDIR /app
 
 COPY package.json bun.lockb* package-lock.json* ./
-RUN bun install --frozen-lockfile 2>/dev/null || bun install
+RUN bun install --ignore-scripts
 
 COPY . .
 
