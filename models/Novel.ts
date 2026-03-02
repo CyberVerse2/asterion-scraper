@@ -47,6 +47,11 @@ export interface NovelUpdatePayload {
   lastScraped: Date;
 }
 
+export interface ListOptions {
+  limit?: number;
+  offset?: number;
+}
+
 let pool: Pool;
 let schemaInitialized = false;
 
@@ -212,6 +217,62 @@ export async function upsertNovelByUrl(
   return mapNovelRow(result.rows[0]);
 }
 
+export async function listNovels(options: ListOptions & { search?: string }): Promise<INovel[]> {
+  const values: Array<string | number> = [];
+  const conditions: string[] = [];
+
+  if (options.search) {
+    values.push(`%${options.search}%`);
+    conditions.push(`(title ILIKE $${values.length} OR author ILIKE $${values.length})`);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  let limitClause = '';
+  if (options.limit !== undefined) {
+    values.push(options.limit);
+    limitClause = `LIMIT $${values.length}`;
+  }
+
+  let offsetClause = '';
+  if (options.offset !== undefined) {
+    values.push(options.offset);
+    offsetClause = `OFFSET $${values.length}`;
+  }
+
+  const result = await getPool().query(
+    `
+      SELECT *
+      FROM novels
+      ${whereClause}
+      ORDER BY id DESC
+      ${limitClause}
+      ${offsetClause}
+    `,
+    values
+  );
+
+  return result.rows.map(mapNovelRow);
+}
+
+export async function getNovelById(novelId: number): Promise<INovel | null> {
+  const result = await getPool().query(
+    `
+      SELECT *
+      FROM novels
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [novelId]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return mapNovelRow(result.rows[0]);
+}
+
 export async function getHighestChapterForNovel(
   novelId: number
 ): Promise<{ chapterNumber: number } | null> {
@@ -249,6 +310,57 @@ export async function upsertChapter(
       RETURNING *
     `,
     [novelId, chapter.chapterNumber, chapter.url, chapter.title, chapter.content]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return mapChapterRow(result.rows[0]);
+}
+
+export async function listChaptersByNovelId(
+  novelId: number,
+  options: ListOptions
+): Promise<IChapter[]> {
+  const values: number[] = [novelId];
+
+  let limitClause = '';
+  if (options.limit !== undefined) {
+    values.push(options.limit);
+    limitClause = `LIMIT $${values.length}`;
+  }
+
+  let offsetClause = '';
+  if (options.offset !== undefined) {
+    values.push(options.offset);
+    offsetClause = `OFFSET $${values.length}`;
+  }
+
+  const result = await getPool().query(
+    `
+      SELECT *
+      FROM chapters
+      WHERE novel_id = $1
+      ORDER BY chapter_number ASC
+      ${limitClause}
+      ${offsetClause}
+    `,
+    values
+  );
+
+  return result.rows.map(mapChapterRow);
+}
+
+export async function getChapterById(chapterId: number): Promise<IChapter | null> {
+  const result = await getPool().query(
+    `
+      SELECT *
+      FROM chapters
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [chapterId]
   );
 
   if (result.rows.length === 0) {

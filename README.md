@@ -68,6 +68,253 @@ The script will start fetching novel details, determine the chapter range, and t
 
 **Note:** The script includes a 1-second delay between chapter requests to avoid overloading the target server. Scraping a large number of chapters will take a significant amount of time.
 
+## Bun REST API
+
+This project now includes a Bun-based REST API for reading and writing novel and chapter data in PostgreSQL.
+
+### Prerequisites
+
+- Bun installed (https://bun.sh/)
+- PostgreSQL running
+- `.env` file in the project root with:
+
+```bash
+DATABASE_URL=postgresql://username:password@localhost:5432/asterion_scraper
+PORT=3000
+```
+
+`PORT` is optional locally (defaults to `3000`), but recommended for consistency with deployment.
+
+### Start the API
+
+Development:
+
+```bash
+npm run api:dev
+```
+
+Production-style start (same runtime command, suitable for hosts like Railway):
+
+```bash
+npm run api:start
+```
+
+### API Conventions
+
+- Base URL: `http://localhost:3000`
+- Content type for writes: `application/json`
+- Success shape:
+  - Single object: `{ "data": { ... } }`
+  - List responses: `{ "data": [ ... ], "meta": { ... } }`
+- Error shape:
+  - `{ "error": "message" }`
+
+### Endpoints
+
+#### Health Check
+
+`GET /health`
+
+Example:
+
+```bash
+curl -s http://localhost:3000/health
+```
+
+Example response:
+
+```json
+{
+  "ok": true
+}
+```
+
+#### List Novels
+
+`GET /novels`
+
+Query params:
+- `limit` (optional, positive integer, default `25`, max `100`)
+- `offset` (optional, non-negative integer, default `0`)
+- `search` (optional, case-insensitive match on `title` or `author`)
+
+Example:
+
+```bash
+curl -s "http://localhost:3000/novels?limit=10&offset=0&search=shadow"
+```
+
+Example response:
+
+```json
+{
+  "data": [
+    {
+      "_id": 1,
+      "title": "Shadow Slave",
+      "novelUrl": "https://novelfire.net/book/shadow-slave",
+      "author": "Guiltythree",
+      "rank": "1",
+      "totalChapters": "2200+",
+      "views": "1000000+",
+      "bookmarks": "50000+",
+      "status": "ONGOING",
+      "genres": ["Fantasy", "Action"],
+      "summary": "A boy enters a deadly world...",
+      "chaptersUrl": "https://novelfire.net/book/shadow-slave/chapters",
+      "imageUrl": "https://...",
+      "rating": 9.1,
+      "lastScraped": "2026-03-02T10:00:00.000Z",
+      "createdAt": "2026-03-01T08:00:00.000Z",
+      "updatedAt": "2026-03-02T10:00:00.000Z"
+    }
+  ],
+  "meta": {
+    "count": 1,
+    "limit": 10,
+    "offset": 0
+  }
+}
+```
+
+#### Get Novel by ID
+
+`GET /novels/:id`
+
+Example:
+
+```bash
+curl -s http://localhost:3000/novels/1
+```
+
+If the novel does not exist, returns `404`:
+
+```json
+{
+  "error": "Novel with id 1 not found."
+}
+```
+
+#### Create or Update Novel (Upsert)
+
+`POST /novels`
+
+Required fields:
+- `title` (string)
+- `novelUrl` (string, used for upsert conflict key)
+
+Optional fields:
+- `author`, `rank`, `totalChapters`, `views`, `bookmarks`, `status`, `summary`, `chaptersUrl`, `imageUrl` (string or omitted)
+- `genres` (string array)
+- `rating` (number `0-10` or `null`)
+- `lastScraped` (ISO date string; defaults to current time if omitted)
+
+Example:
+
+```bash
+curl -s -X POST http://localhost:3000/novels \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Shadow Slave",
+    "novelUrl": "https://novelfire.net/book/shadow-slave",
+    "author": "Guiltythree",
+    "genres": ["Fantasy", "Action"],
+    "rating": 9.1
+  }'
+```
+
+#### List Chapters for a Novel
+
+`GET /novels/:id/chapters`
+
+Query params:
+- `limit` (optional, positive integer, default `25`, max `100`)
+- `offset` (optional, non-negative integer, default `0`)
+
+Example:
+
+```bash
+curl -s "http://localhost:3000/novels/1/chapters?limit=20&offset=0"
+```
+
+If novel does not exist, returns `404`.
+
+#### Create or Update Chapter (Upsert)
+
+`POST /novels/:id/chapters`
+
+Required fields:
+- `chapterNumber` (positive integer; used with `novel_id` for upsert)
+- `url` (string)
+- `title` (string)
+- `content` (string)
+
+Example:
+
+```bash
+curl -s -X POST http://localhost:3000/novels/1/chapters \
+  -H "Content-Type: application/json" \
+  -d '{
+    "chapterNumber": 1,
+    "url": "https://novelfire.net/book/shadow-slave/chapter-1",
+    "title": "Chapter 1",
+    "content": "Chapter text..."
+  }'
+```
+
+If novel does not exist, returns `404`.
+
+#### Get Chapter by ID
+
+`GET /chapters/:id`
+
+Example:
+
+```bash
+curl -s http://localhost:3000/chapters/10
+```
+
+If chapter does not exist, returns `404`.
+
+### Common Error Codes
+
+- `400` invalid path/query/body input
+- `404` resource not found
+- `500` unexpected server/database error
+
+### Local API Test Flow
+
+1. Start API with `npm run api:dev`
+2. Verify health: `curl -s http://localhost:3000/health`
+3. Upsert a novel with `POST /novels`
+4. Fetch novels with `GET /novels`
+5. Upsert a chapter with `POST /novels/:id/chapters`
+6. Fetch chapter list with `GET /novels/:id/chapters`
+7. Fetch a single chapter with `GET /chapters/:id`
+
+### Railway Deployment (Bun)
+
+Railway can host Bun apps. Use these defaults:
+
+- Start command: `bun run api.ts` (or `npm run api:start`)
+- Ensure env vars are set in Railway:
+  - `DATABASE_URL` (PostgreSQL connection string)
+  - `PORT` (Railway sets this automatically; your app already reads it)
+- Health check endpoint: `/health`
+
+Optional `railway.toml`:
+
+```toml
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "bun run api.ts"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+```
+
 ## Configuration
 
 - The target novels are defined in the `startUrls` array within the `scraper.ts` file. Modify this array to add or remove novels. Ensure selectors in the `scrapeNovelDetails` and `scrapeChapterContent` functions are compatible with `novelfire.net`'s structure.
