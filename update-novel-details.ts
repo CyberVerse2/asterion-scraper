@@ -20,6 +20,7 @@ dotenv.config();
 
 const REQUEST_DELAY_MS = 2000;
 const DB_OPERATION_DELAY_MS = 100;
+const MAX_HTTP_ATTEMPTS = 4;
 
 interface UpdateStats {
   totalNovels: number;
@@ -44,6 +45,45 @@ interface CliOptions {
 }
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const httpClient = axios.create({
+  timeout: 30000,
+  headers: {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    Accept:
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cache-Control': 'no-cache',
+    Pragma: 'no-cache',
+    Referer: 'https://novelfire.net/'
+  }
+});
+
+function shouldRetryStatus(status?: number): boolean {
+  return status === 403 || status === 429 || (status !== undefined && status >= 500);
+}
+
+async function fetchPageHtml(url: string): Promise<string> {
+  for (let attempt = 1; attempt <= MAX_HTTP_ATTEMPTS; attempt++) {
+    try {
+      const response = await httpClient.get<string>(url);
+      return response.data;
+    } catch (error) {
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      const shouldRetry = shouldRetryStatus(status) && attempt < MAX_HTTP_ATTEMPTS;
+      if (!shouldRetry) {
+        throw error;
+      }
+      const backoffMs = 1500 * attempt;
+      console.warn(
+        `Request failed for ${url} with status ${status ?? 'unknown'} (attempt ${attempt}/${MAX_HTTP_ATTEMPTS}). Retrying in ${backoffMs}ms...`
+      );
+      await delay(backoffMs);
+    }
+  }
+  throw new Error(`Failed to fetch ${url} after ${MAX_HTTP_ATTEMPTS} attempts`);
+}
 
 function parseCliArgs(): CliOptions {
   const args = process.argv.slice(2);
@@ -158,7 +198,7 @@ async function updateNovelDetails(
   try {
     await delay(REQUEST_DELAY_MS);
 
-    const { data } = await axios.get(novel.novelUrl);
+    const data = await fetchPageHtml(novel.novelUrl);
     const $ = cheerio.load(data);
     const extractedDetails = extractNovelDetails($);
 

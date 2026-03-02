@@ -29,9 +29,57 @@ dotenv.config();
 const REQUEST_DELAY_MS = 2000; // Delay between HTTP requests (milliseconds)
 const DB_OPERATION_DELAY_MS = 50; // Smaller delay between DB writes
 const INTER_NOVEL_DELAY_MS = 5000; // Delay in ms between processing different novels (e.g., 5 seconds)
+const MAX_HTTP_ATTEMPTS = 4;
 
 // --- Helper Functions ---
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const httpClient = axios.create({
+  timeout: 30000,
+  headers: {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    Accept:
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cache-Control': 'no-cache',
+    Pragma: 'no-cache',
+    Referer: 'https://novelfire.net/'
+  }
+});
+
+function shouldRetryStatus(status?: number): boolean {
+  return status === 403 || status === 429 || (status !== undefined && status >= 500);
+}
+
+function logAxiosError(context: string, error: unknown): void {
+  if (axios.isAxiosError(error)) {
+    console.error(`${context} (status: ${error.response?.status ?? 'unknown'}): ${error.message}`);
+    return;
+  }
+  console.error(context, error);
+}
+
+async function fetchPageHtml(url: string): Promise<string> {
+  for (let attempt = 1; attempt <= MAX_HTTP_ATTEMPTS; attempt++) {
+    try {
+      const response = await httpClient.get<string>(url);
+      return response.data;
+    } catch (error) {
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      const shouldRetry = shouldRetryStatus(status) && attempt < MAX_HTTP_ATTEMPTS;
+      if (!shouldRetry) {
+        throw error;
+      }
+      const backoffMs = 1500 * attempt;
+      console.warn(
+        `Request failed for ${url} with status ${status ?? 'unknown'} (attempt ${attempt}/${MAX_HTTP_ATTEMPTS}). Retrying in ${backoffMs}ms...`
+      );
+      await delay(backoffMs);
+    }
+  }
+  throw new Error(`Failed to fetch ${url} after ${MAX_HTTP_ATTEMPTS} attempts`);
+}
 
 // --- Interfaces & Types ---
 interface NovelDetails {
@@ -61,7 +109,7 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
   console.log(`Fetching novel details from: ${novelUrl}`);
   try {
     await delay(REQUEST_DELAY_MS); // Delay before first request
-    const { data } = await axios.get(novelUrl);
+    const data = await fetchPageHtml(novelUrl);
     const $ = cheerio.load(data);
 
     // Extract details (Selectors updated for novelfire.net as of 2025-04-24)
@@ -113,7 +161,7 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
       rating
     };
   } catch (error: unknown) {
-    console.error(`Error fetching or parsing novel details from ${novelUrl}:`, error);
+    logAxiosError(`Error fetching or parsing novel details from ${novelUrl}`, error);
     return {
       title: null,
       author: null,
@@ -138,7 +186,7 @@ async function scrapeChapterContent(
   console.log(`Fetching chapter content from: ${chapterUrl}`);
   try {
     await delay(REQUEST_DELAY_MS); // Delay before each chapter content request
-    const { data } = await axios.get(chapterUrl);
+    const data = await fetchPageHtml(chapterUrl);
     const $ = cheerio.load(data);
 
     const chapterTitle = $('h1 span.chapter-title').text().trim();
@@ -161,10 +209,7 @@ async function scrapeChapterContent(
       content: chapterContent
     };
   } catch (error) {
-    console.error(
-      `  - Error scraping chapter content from ${chapterUrl}:`,
-      error instanceof Error ? error.message : error
-    );
+    logAxiosError(`  - Error scraping chapter content from ${chapterUrl}`, error);
     return {
       url: chapterUrl,
       chapterNumber: chapterNumber,
