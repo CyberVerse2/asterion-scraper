@@ -7,10 +7,8 @@
 		"node": ">=18.0.0"
 	},
 	"dependencies": {
-		"crawlee": "^3.11.5",
 		"dotenv": "^16.5.0",
-		"pg": "^8.16.3",
-		"playwright": "*"
+		"pg": "^8.16.3"
 	},
 	"devDependencies": {
 		"@apify/eslint-config-ts": "^0.3.0",
@@ -38,8 +36,7 @@
 		"lint": "eslint ./src --ext .ts",
 		"lint:fix": "eslint ./src --ext .ts --fix",
 		"test": "bun test",
-		"test:integration": "bun test api.integration.test.ts",
-		"postinstall": "npx crawlee install-playwright-browsers"
+		"test:integration": "bun test api.integration.test.ts"
 	},
 	"author": "It's not you it's me",
 	"license": "ISC",
