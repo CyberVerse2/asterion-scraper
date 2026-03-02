@@ -1,14 +1,19 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 
-// Import models (adjust path if necessary)
-import Novel, { INovel, Chapter, IChapter } from './models/Novel.js';
+import {
+  connectDB,
+  disconnectDB,
+  getHighestChapterForNovel,
+  INovel,
+  upsertChapter,
+  upsertNovelByUrl
+} from './models/Novel.js';
 
 // Import shared extraction function
 import { extractNovelDetailsSimple } from './utils/novel-details-extractor.js';
@@ -40,13 +45,8 @@ interface NovelDetails {
   genres: string[];
   summary: string | null;
   chaptersUrl: string | null;
-  imageUrl: string | null; // Added imageUrl field
-  rating: number | null; // NEW: Novel rating field
-}
-
-interface ChapterLink {
-  url: string;
-  title: string;
+  imageUrl: string | null;
+  rating: number | null;
 }
 
 interface ChapterData {
@@ -54,21 +54,6 @@ interface ChapterData {
   chapterNumber: number;
   title: string;
   content: string | null;
-}
-
-// --- Database Connection ---
-async function connectDB(): Promise<void> {
-  if (!process.env.MONGODB_URI) {
-    console.error('Error: MONGODB_URI is not defined in .env file');
-    process.exit(1);
-  }
-  try {
-    await mongoose.connect(process.env.MONGODB_URI);
-    console.log('MongoDB Connected successfully.');
-  } catch (err) {
-    console.error('MongoDB connection error:', err);
-    process.exit(1);
-  }
 }
 
 // --- Scraping Functions ---
@@ -81,8 +66,8 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
 
     // Extract details (Selectors updated for novelfire.net as of 2025-04-24)
     const title = $('h1.novel-title').text().trim() || null;
-    const author = $('.author a span[itemprop="author"]').first().text().trim() || null; // Get first author listed
-    const rank = $('.rank strong').text().replace('RANK ', '').trim() || null; // Remove prefix
+    const author = $('.author a span[itemprop="author"]').first().text().trim() || null;
+    const rank = $('.rank strong').text().replace('RANK ', '').trim() || null;
     const chapters = $('.header-stats span:nth-child(1) strong').text().trim() || null;
     const views = $('.header-stats span:nth-child(2) strong').text().trim() || null;
     const bookmarks = $('.header-stats span:nth-child(3) strong').text().trim() || null;
@@ -91,14 +76,13 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
       .map((i, el) => $(el).text().trim())
       .get();
 
-    // Use shared extraction function for summary and rating with enhanced fallback logic
     const extractedDetails = extractNovelDetailsSimple($);
     const summary = extractedDetails.summary;
     const rating = extractedDetails.rating;
 
     let chaptersUrl = $('a.chapter-latest-container').attr('href') || null;
     let imageUrl =
-      $('figure.cover img.lazy').attr('data-src') || $('figure.cover img.lazy').attr('src') || null; // Get data-src or src
+      $('figure.cover img.lazy').attr('data-src') || $('figure.cover img.lazy').attr('src') || null;
 
     // Ensure chaptersUrl is absolute
     if (chaptersUrl && !chaptersUrl.startsWith('http')) {
@@ -124,11 +108,10 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
       summary,
       chaptersUrl,
       imageUrl,
-      rating // NEW: Include rating in return object
+      rating
     };
   } catch (error: unknown) {
     console.error(`Error fetching or parsing novel details from ${novelUrl}:`, error);
-    // Return default/null object to indicate failure but allow potential partial processing
     return {
       title: null,
       author: null,
@@ -141,7 +124,7 @@ async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
       summary: null,
       chaptersUrl: null,
       imageUrl: null,
-      rating: null // NEW: Include rating in error case
+      rating: null
     };
   }
 }
@@ -156,15 +139,10 @@ async function scrapeChapterContent(
     const { data } = await axios.get(chapterUrl);
     const $ = cheerio.load(data);
 
-    // Extract title (adjust selector)
     const chapterTitle = $('h1 span.chapter-title').text().trim();
 
-    // Extract chapter content - **MODIFIED TO GET HTML**
-    // Use the selector for the main content container
-    const contentSelector = '#content'; // Adjust if needed!
+    const contentSelector = '#content';
     const rawHtmlContent = $(contentSelector).html();
-
-    // Trim whitespace and handle potential null if selector not found
     const chapterContent = rawHtmlContent ? rawHtmlContent.trim() : null;
 
     if (!chapterContent) {
@@ -178,7 +156,6 @@ async function scrapeChapterContent(
       url: chapterUrl,
       chapterNumber: chapterNumber,
       title: chapterTitle || 'Untitled Chapter',
-      // Store the raw HTML string (or null if not found)
       content: chapterContent
     };
   } catch (error) {
@@ -186,7 +163,6 @@ async function scrapeChapterContent(
       `  - Error scraping chapter content from ${chapterUrl}:`,
       error instanceof Error ? error.message : error
     );
-    // Return data indicating failure but preserving URL/number
     return {
       url: chapterUrl,
       chapterNumber: chapterNumber,
@@ -200,26 +176,25 @@ async function scrapeChapterContent(
 async function main() {
   const startTime = Date.now();
   const stats = {
-    novelsProcessed: 0, // Count of novels successfully found/created in DB
+    novelsProcessed: 0,
     chaptersAttempted: 0,
     chaptersScrapedSuccess: 0,
     chaptersScrapedError: 0,
     chaptersWithEmptyContent: 0,
-    dbNovelUpdateSuccess: 0, // Essentially same as novelsProcessed
+    dbNovelUpdateSuccess: 0,
     dbChapterUpdateSuccess: 0,
-    dbErrors: 0, // Errors during DB operations (novel or chapter)
+    dbErrors: 0,
     startTime: startTime,
     endTime: 0,
     durationSeconds: 0,
-    novelsSkippedOrFailed: 0 // Count of novels that failed processing entirely
+    novelsSkippedOrFailed: 0
   };
 
-  // *** Define an array of starting URL(s) ***
-  // Moved outside 'try' block for accessibility in 'finally'
   const startUrls = [
+    'https://novelfire.net/book/shadow-slave',
     'https://novelfire.net/book/lord-of-the-mysteries',
     'https://novelfire.net/book/reverend-insanity',
-    'https://novelfire.net/book/infinite-mana-in-the-apocalypse', // Example additional novel
+    'https://novelfire.net/book/infinite-mana-in-the-apocalypse',
     'https://novelfire.net/book/the-beginning-after-the-end',
     'https://novelfire.net/book/omniscient-readers-viewpoint',
     'https://novelfire.net/book/advent-of-the-three-calamities',
@@ -302,8 +277,6 @@ async function main() {
       console.log(`============================================================\n`);
 
       try {
-        // Add try block for processing a single novel
-        // 1. Scrape Novel Details
         const novelDetails = await scrapeNovelDetails(startUrl);
         if (!novelDetails.title || !novelDetails.chaptersUrl) {
           console.error(
@@ -316,10 +289,9 @@ async function main() {
         console.log('\n--- Novel Details ---');
         console.log(novelDetails); // Log details for context
 
-        // Determine latest chapter number --- USE VALUE FROM DETAILS
         let latestChapterNumber: number | null = null;
         if (novelDetails.chapters) {
-          const parsedChapters = parseInt(novelDetails.chapters.replace(/,/g, ''), 10); // Handle commas like in 2,303
+          const parsedChapters = parseInt(novelDetails.chapters.replace(/,/g, ''), 10);
           if (!isNaN(parsedChapters) && parsedChapters > 0) {
             latestChapterNumber = parsedChapters;
             console.log(`\nUsing total chapters count from novel details: ${latestChapterNumber}`);
@@ -340,56 +312,42 @@ async function main() {
           continue; // Skip to next novel URL
         }
 
-        // --- Save/Update Novel Document First ---
         let savedNovel: INovel | null = null;
         console.log(`\n--- Finding/Updating ${novelDetails.title} in Database ---`);
         try {
-          savedNovel = await Novel.findOneAndUpdate(
-            // Use novelUrl as the primary unique identifier
-            { novelUrl: startUrl },
-            {
-              $set: {
-                title: novelDetails.title, // Update title in case it changed
-                author: novelDetails.author,
-                rank: novelDetails.rank,
-                totalChapters: novelDetails.chapters,
-                views: novelDetails.views,
-                bookmarks: novelDetails.bookmarks,
-                status: novelDetails.status,
-                genres: novelDetails.genres,
-                summary: novelDetails.summary,
-                chaptersUrl: novelDetails.chaptersUrl,
-                imageUrl: novelDetails.imageUrl,
-                rating: novelDetails.rating, // NEW: Save rating to database
-                lastScraped: new Date() // Update last scraped time
-              }
-            },
-            { upsert: true, new: true, runValidators: true } // Create if not found, return new doc
-          );
+          savedNovel = await upsertNovelByUrl(startUrl, {
+            title: novelDetails.title,
+            author: novelDetails.author,
+            rank: novelDetails.rank,
+            totalChapters: novelDetails.chapters,
+            views: novelDetails.views,
+            bookmarks: novelDetails.bookmarks,
+            status: novelDetails.status,
+            genres: novelDetails.genres,
+            summary: novelDetails.summary,
+            chaptersUrl: novelDetails.chaptersUrl,
+            imageUrl: novelDetails.imageUrl,
+            rating: novelDetails.rating,
+            lastScraped: new Date()
+          });
         } catch (novelDbError) {
           stats.dbErrors++;
           console.error(
-            `Error during findOneAndUpdate for novel ${novelDetails.title} (${startUrl}):`,
+            `Error upserting novel ${novelDetails.title} (${startUrl}):`,
             novelDbError
           );
           throw novelDbError; // Re-throw to be caught by the outer try/catch for this novel
         }
 
-        // Check if we successfully found or created the novel
         if (savedNovel) {
           console.log(`Found/Created Novel: ${savedNovel.title} (ID: ${savedNovel._id})`);
-          // Increment counts ONLY if novel DB operation was successful
           stats.novelsProcessed++;
           stats.dbNovelUpdateSuccess++;
 
-          // --- Determine Starting Chapter Number ---
           let startChapterNumber = 1;
           let highestChapterNumberInDb: number | null = null;
           try {
-            const highestChapterDoc = await Chapter.findOne({ novel: savedNovel._id })
-              .sort({ chapterNumber: -1 })
-              .select('chapterNumber')
-              .lean();
+            const highestChapterDoc = await getHighestChapterForNovel(savedNovel._id);
 
             if (highestChapterDoc && highestChapterDoc.chapterNumber) {
               highestChapterNumberInDb = highestChapterDoc.chapterNumber;
@@ -411,9 +369,7 @@ async function main() {
             console.warn('Assuming start from chapter 1 due to error.');
             startChapterNumber = 1;
           }
-          // ---------------------------------
 
-          // Check if novel is already up-to-date before starting loop
           if (startChapterNumber > latestChapterNumber) {
             console.log(
               `\nNovel "${savedNovel.title}" is already up-to-date (Last chapter in DB: ${
@@ -421,8 +377,6 @@ async function main() {
               }, Latest online: ${latestChapterNumber}). No new chapters to process.`
             );
           } else {
-            // Only proceed if there are chapters to scrape
-            // 2. Loop through chapters, scrape, and save individually
             const chaptersBaseUrl = novelDetails.chaptersUrl.split('/chapters')[0];
             console.log(
               `\n--- Processing Chapters ${startChapterNumber} to ${latestChapterNumber} for ${savedNovel.title} ---`
@@ -433,43 +387,22 @@ async function main() {
               const chapterUrl = `${chaptersBaseUrl}/chapter-${i}`;
               console.log(`Processing Chapter ${i}/${latestChapterNumber}: ${chapterUrl}`);
               try {
-                // Try scraping and saving a single chapter
                 const chapterData = await scrapeChapterContent(chapterUrl, i);
                 if (chapterData.content) {
                   stats.chaptersScrapedSuccess++;
-                  // --- Save Chapter Immediately ---
                   try {
                     await delay(DB_OPERATION_DELAY_MS);
-                    const savedChapter = await Chapter.findOneAndUpdate(
-                      { novel: savedNovel._id, chapterNumber: chapterData.chapterNumber },
-                      {
-                        $set: {
-                          url: chapterData.url,
-                          title: chapterData.title,
-                          content: chapterData.content
-                        }
-                      },
-                      { upsert: true, new: true, setDefaultsOnInsert: true }
-                    );
+                    const savedChapter = await upsertChapter(savedNovel._id, {
+                      chapterNumber: chapterData.chapterNumber,
+                      url: chapterData.url,
+                      title: chapterData.title,
+                      content: chapterData.content
+                    });
                     if (savedChapter) {
                       stats.dbChapterUpdateSuccess++;
                       console.log(
                         `  Saved/Updated Chapter ${savedChapter.chapterNumber} (ID: ${savedChapter._id})`
                       );
-                      // --- Update Novel's Chapter List Immediately ---
-                      try {
-                        await Novel.updateOne(
-                          { _id: savedNovel._id },
-                          { $addToSet: { chapters: savedChapter._id } }
-                        );
-                        // Don't log update success every time, becomes too verbose
-                      } catch (novelUpdateError) {
-                        stats.dbErrors++;
-                        console.error(
-                          `    - Error updating Novel chapter list for chapter ${savedChapter.chapterNumber}:`,
-                          novelUpdateError
-                        );
-                      }
                     } else {
                       console.warn(
                         `  DB op ok, but failed to get Chapter ${chapterData.chapterNumber} doc back.`
@@ -498,22 +431,18 @@ async function main() {
                 console.error(`Error processing chapter ${i} (${chapterUrl}):`, chapterScrapeError);
                 // Continue to the next chapter even if one fails
               }
-            } // End of chapter loop for this novel
+            }
             console.log(`\n--- Finished Processing Chapters for ${savedNovel.title} ---`);
-          } // End else: process chapters
+          }
         } else {
-          // Handle case where novel could not be found/created after findOneAndUpdate
           console.error(
             `Failed to find or create the novel document in the database for ${startUrl}. Aborting chapter scrape for this novel.`
           );
-          // stats.novelsSkippedOrFailed++; // Already handled if initial scrape failed
-          stats.dbErrors++; // It's a DB error if findOneAndUpdate didn't return a doc
-        } // End if(savedNovel)
+          stats.dbErrors++;
+        }
       } catch (error) {
-        // Catch errors specific to processing *this* URL
         console.error(`An unhandled error occurred processing ${startUrl}:`, error);
         stats.novelsSkippedOrFailed++;
-        // Log the error and continue to the next novel URL
       }
 
       // Small delay between processing different novels
@@ -523,13 +452,11 @@ async function main() {
         }s before next novel... ---`
       );
       await delay(INTER_NOVEL_DELAY_MS);
-    } // --- End of loop for startUrls ---
+    }
   } catch (error) {
-    // Catch initial connection errors or other fatal errors
     console.error('A fatal error occurred during the scraper run:', error);
     stats.novelsSkippedOrFailed = startUrls.length - stats.novelsProcessed; // Assume all remaining failed
   } finally {
-    // Calculate final duration
     stats.endTime = Date.now();
     stats.durationSeconds = (stats.endTime - stats.startTime) / 1000;
 
@@ -546,11 +473,10 @@ async function main() {
     console.log(`DB Chapter Updates OK: ${stats.dbChapterUpdateSuccess}`);
     console.log(`Total Database Errors: ${stats.dbErrors}`);
 
-    // --- Write Stats to File ---
     try {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-'); // Format timestamp for filename
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const statsFilename = `scraper-stats-${timestamp}.txt`;
-      const statsFilePath = path.join(__dirname, statsFilename); // Place it in the script's directory
+      const statsFilePath = path.join(__dirname, statsFilename);
 
       const statsString = `--- Scraper Run Finished ---
 Timestamp: ${new Date(stats.endTime).toISOString()}
@@ -576,25 +502,14 @@ Total Database Errors: ${stats.dbErrors}
 `;
 
       fs.writeFileSync(statsFilePath, statsString);
-      console.log(`
-Statistics written to: ${statsFilePath}`);
+      console.log(`\nStatistics written to: ${statsFilePath}`);
     } catch (fileError) {
-      console.error(
-        `
-Error writing statistics to file:`,
-        fileError
-      );
+      console.error(`\nError writing statistics to file:`, fileError);
     }
-    // ---------------------------
 
-    if (mongoose.connection.readyState === 1) {
-      await mongoose.disconnect();
-      console.log('MongoDB disconnected.');
-    } else {
-      console.log('MongoDB connection already closed or not established.');
-    }
+    await disconnectDB();
+    console.log('PostgreSQL disconnected.');
   }
-} // End of main function
+}
 
-// Run the main function
 main();
