@@ -115,5 +115,11 @@ describe('API integration tests (real DB)', () => {
     const getChapter = await requestJson('GET', `/chapters/${chapterId}`);
     expect(getChapter.status).toBe(200);
     expect(Number((getChapter.json.data as Record<string, unknown>)._id)).toBe(chapterId);
+
+    const getChapterByNumber = await requestJson('GET', `/novels/${novelId}/chapters/1`);
+    expect(getChapterByNumber.status).toBe(200);
+    const chapterByNumber = getChapterByNumber.json.data as Record<string, unknown>;
+    expect(chapterByNumber.chapterNumber).toBe(1);
+    expect(chapterByNumber.content).toBe('Integration chapter content');
   }, 20000);
 });

@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import {
   NovelUpdatePayload,
   getChapterById,
+  getChapterByNovelIdAndNumber,
   getNovelById,
   listChaptersByNovelId,
   listNovels,
@@ -36,6 +37,10 @@ export interface ApiDependencies {
     chapter: { chapterNumber: number; url: string; title: string; content: string }
   ) => Promise<unknown | null>;
   getChapterById: (chapterId: number) => Promise<unknown | null>;
+  getChapterByNovelIdAndNumber: (
+    novelId: number,
+    chapterNumber: number
+  ) => Promise<unknown | null>;
   connectDB: () => Promise<void>;
   disconnectDB: () => Promise<void>;
 }
@@ -47,6 +52,7 @@ const defaultDependencies: ApiDependencies = {
   listChaptersByNovelId,
   upsertChapter,
   getChapterById,
+  getChapterByNovelIdAndNumber,
   connectDB,
   disconnectDB
 };
@@ -334,6 +340,26 @@ export function createApiHandler(deps: ApiDependencies = defaultDependencies) {
         }
 
         return jsonResponse(200, { data: novel });
+      }
+
+      const novelChapterNumberMatch = pathname.match(/^\/novels\/(\d+)\/chapters\/(\d+)$/);
+      if (method === 'GET' && novelChapterNumberMatch) {
+        const novelId = Number(novelChapterNumberMatch[1]);
+        const chapterNumber = parsePositiveInt(novelChapterNumberMatch[2]);
+        if (chapterNumber === null) {
+          return jsonResponse(400, { error: 'Chapter number must be a positive integer.' });
+        }
+        const novel = await deps.getNovelById(novelId);
+        if (!novel) {
+          return jsonResponse(404, { error: `Novel with id ${novelId} not found.` });
+        }
+        const chapter = await deps.getChapterByNovelIdAndNumber(novelId, chapterNumber);
+        if (!chapter) {
+          return jsonResponse(404, {
+            error: `Chapter ${chapterNumber} not found for novel ${novelId}.`
+          });
+        }
+        return jsonResponse(200, { data: chapter });
       }
 
       const novelChapterMatch = pathname.match(/^\/novels\/(\d+)\/chapters$/);

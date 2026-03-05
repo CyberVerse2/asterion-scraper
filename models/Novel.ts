@@ -412,6 +412,27 @@ export async function listChaptersByNovelId(
   };
 }
 
+export async function getChapterByNovelIdAndNumber(
+  novelId: number,
+  chapterNumber: number
+): Promise<IChapter | null> {
+  const result = await getPool().query(
+    `
+      SELECT *
+      FROM chapters
+      WHERE novel_id = $1 AND chapter_number = $2
+      LIMIT 1
+    `,
+    [novelId, chapterNumber]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return mapChapterRow(result.rows[0]);
+}
+
 export async function getChapterById(chapterId: number): Promise<IChapter | null> {
   const result = await getPool().query(
     `

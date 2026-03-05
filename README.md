@@ -257,7 +257,21 @@ curl -s "http://localhost:3000/novels/1/chapters?page=1&pageSize=20"
 
 If novel does not exist, returns `404`.
 
-`GET /novels/:id/chapters` returns lightweight chapter list items (no `content` field) for faster responses. Use `GET /chapters/:id` to fetch full chapter content.
+`GET /novels/:id/chapters` returns lightweight chapter list items (no `content` field) for faster responses. Use `GET /chapters/:id` or `GET /novels/:id/chapters/:number` to fetch full chapter content.
+
+#### Get Chapter by Novel ID and Chapter Number
+
+`GET /novels/:id/chapters/:number`
+
+Returns the full chapter (including `content`) for the given chapter number. Use this to fetch a specific chapter without looking up its ID first.
+
+Example:
+
+```bash
+curl -s http://localhost:3000/novels/1/chapters/1
+```
+
+If novel or chapter does not exist, returns `404`.
 
 #### Create or Update Chapter (Upsert)
 
