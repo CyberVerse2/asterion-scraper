@@ -11,7 +11,7 @@ import {
   disconnectDB,
   getHighestChapterForNovel,
   INovel,
-  upsertChapter,
+  upsertChapters,
   upsertNovelByUrl
 } from './models/Novel.js';
 
@@ -26,11 +26,13 @@ const __dirname = dirname(__filename);
 dotenv.config();
 
 // --- Configuration ---
-const REQUEST_DELAY_MS = 2000; // Delay between HTTP requests (milliseconds)
+const REQUEST_STAGGER_MS = 300; // Gap between starting HTTP requests
 const DB_OPERATION_DELAY_MS = 50; // Smaller delay between DB writes
-const INTER_NOVEL_DELAY_MS = 5000; // Delay in ms between processing different novels (e.g., 5 seconds)
 const MAX_HTTP_ATTEMPTS = 4;
 const SESSION_WARMUP_PATHS = ['/', '/latest-release-novels'];
+const NOVEL_CONCURRENCY = 3;
+const CHAPTER_CONCURRENCY = 6;
+const CHAPTER_BATCH_SIZE = 25;
 
 const BROWSER_USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
@@ -41,6 +43,7 @@ const BROWSER_USER_AGENTS = [
 // --- Helper Functions ---
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const cookieJar = new Map<string, string>();
+let nextRequestSlotAt = 0;
 
 const httpClient = axios.create({
   timeout: 30000,
@@ -122,6 +125,7 @@ async function warmupSession(targetUrl: string): Promise<void> {
   for (const sessionPath of SESSION_WARMUP_PATHS) {
     const warmupUrl = `${origin}${sessionPath}`;
     try {
+      await waitForRequestSlot();
       const response = await httpClient.get(warmupUrl, {
         headers: {
           ...buildRequestHeaders(warmupUrl, 1),
@@ -144,11 +148,20 @@ function logAxiosError(context: string, error: unknown): void {
   console.error(context, error);
 }
 
-async function fetchPageHtml(url: string): Promise<string> {
-  await warmupSession(url);
+async function waitForRequestSlot(): Promise<void> {
+  const now = Date.now();
+  const waitMs = Math.max(0, nextRequestSlotAt - now);
+  nextRequestSlotAt = Math.max(nextRequestSlotAt, now) + REQUEST_STAGGER_MS;
 
+  if (waitMs > 0) {
+    await delay(waitMs);
+  }
+}
+
+async function fetchPageHtml(url: string): Promise<string> {
   for (let attempt = 1; attempt <= MAX_HTTP_ATTEMPTS; attempt++) {
     try {
+      await waitForRequestSlot();
       const response = await httpClient.get<string>(url, {
         headers: buildRequestHeaders(url, attempt)
       });
@@ -172,6 +185,40 @@ async function fetchPageHtml(url: string): Promise<string> {
     }
   }
   throw new Error(`Failed to fetch ${url} after ${MAX_HTTP_ATTEMPTS} attempts`);
+}
+
+function chunkArray<T>(items: T[], chunkSize: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function runWorker(): Promise<void> {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+
+      if (currentIndex >= items.length) {
+        return;
+      }
+
+      results[currentIndex] = await worker(items[currentIndex], currentIndex);
+    }
+  }
+
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results;
 }
 
 // --- Interfaces & Types ---
@@ -201,7 +248,6 @@ interface ChapterData {
 async function scrapeNovelDetails(novelUrl: string): Promise<NovelDetails> {
   console.log(`Fetching novel details from: ${novelUrl}`);
   try {
-    await delay(REQUEST_DELAY_MS); // Delay before first request
     const data = await fetchPageHtml(novelUrl);
     const $ = cheerio.load(data);
 
@@ -278,7 +324,6 @@ async function scrapeChapterContent(
 ): Promise<ChapterData> {
   console.log(`Fetching chapter content from: ${chapterUrl}`);
   try {
-    await delay(REQUEST_DELAY_MS); // Delay before each chapter content request
     const data = await fetchPageHtml(chapterUrl);
     const $ = cheerio.load(data);
 
@@ -312,6 +357,217 @@ async function scrapeChapterContent(
   }
 }
 
+async function saveChapterBatch(
+  novel: INovel,
+  chapters: ChapterData[],
+  stats: {
+    chaptersScrapedSuccess: number;
+    chaptersWithEmptyContent: number;
+    dbChapterUpdateSuccess: number;
+    dbErrors: number;
+  }
+): Promise<void> {
+  const validChapters = chapters.filter(
+    (chapter): chapter is ChapterData & { content: string } => Boolean(chapter.content)
+  );
+  const emptyChapterCount = chapters.length - validChapters.length;
+
+  stats.chaptersScrapedSuccess += validChapters.length;
+  stats.chaptersWithEmptyContent += emptyChapterCount;
+
+  if (validChapters.length === 0) {
+    return;
+  }
+
+  try {
+    await delay(DB_OPERATION_DELAY_MS);
+    const savedChapters = await upsertChapters(novel._id, validChapters);
+    stats.dbChapterUpdateSuccess += savedChapters.length;
+    console.log(
+      `  Saved/Updated ${savedChapters.length} chapters for ${novel.title} (${validChapters[0].chapterNumber}-${validChapters[validChapters.length - 1].chapterNumber})`
+    );
+  } catch (chapterDbError) {
+    stats.dbErrors += validChapters.length;
+    console.error(
+      `  Error saving chapter batch for ${novel.title} (${validChapters[0].chapterNumber}-${validChapters[validChapters.length - 1].chapterNumber}):`,
+      chapterDbError
+    );
+  }
+}
+
+async function processNovel(
+  startUrl: string,
+  stats: {
+    novelsProcessed: number;
+    chaptersAttempted: number;
+    chaptersScrapedSuccess: number;
+    chaptersScrapedError: number;
+    chaptersWithEmptyContent: number;
+    dbNovelUpdateSuccess: number;
+    dbChapterUpdateSuccess: number;
+    dbErrors: number;
+    novelsSkippedOrFailed: number;
+  }
+): Promise<void> {
+  console.log(`\n============================================================`);
+  console.log(`Processing Novel URL: ${startUrl}`);
+  console.log(`============================================================\n`);
+
+  try {
+    const novelDetails = await scrapeNovelDetails(startUrl);
+    if (!novelDetails.title || !novelDetails.chaptersUrl) {
+      console.error(
+        `Could not scrape essential novel details (title/chapters URL) for ${startUrl}, skipping this novel.`
+      );
+      stats.novelsSkippedOrFailed++;
+      return;
+    }
+
+    console.log(`\nSuccessfully scraped novel details for: ${novelDetails.title}`);
+    console.log('\n--- Novel Details ---');
+    console.log(novelDetails);
+
+    let latestChapterNumber: number | null = null;
+    if (novelDetails.chapters) {
+      const parsedChapters = parseInt(novelDetails.chapters.replace(/,/g, ''), 10);
+      if (!isNaN(parsedChapters) && parsedChapters > 0) {
+        latestChapterNumber = parsedChapters;
+        console.log(`\nUsing total chapters count from novel details: ${latestChapterNumber}`);
+      } else {
+        console.error(
+          `Could not parse valid chapter count ('${novelDetails.chapters}') from novel details for ${novelDetails.title}.`
+        );
+      }
+    } else {
+      console.error(`Novel details did not contain a chapter count for ${novelDetails.title}.`);
+    }
+
+    if (latestChapterNumber === null) {
+      console.error(
+        `Failed to determine the latest chapter number for ${novelDetails.title}. Aborting chapter scrape for this novel.`
+      );
+      stats.novelsSkippedOrFailed++;
+      return;
+    }
+
+    let savedNovel: INovel | null = null;
+    console.log(`\n--- Finding/Updating ${novelDetails.title} in Database ---`);
+    try {
+      savedNovel = await upsertNovelByUrl(startUrl, {
+        title: novelDetails.title,
+        author: novelDetails.author,
+        rank: novelDetails.rank,
+        totalChapters: novelDetails.chapters,
+        views: novelDetails.views,
+        bookmarks: novelDetails.bookmarks,
+        status: novelDetails.status,
+        genres: novelDetails.genres,
+        summary: novelDetails.summary,
+        chaptersUrl: novelDetails.chaptersUrl,
+        imageUrl: novelDetails.imageUrl,
+        rating: novelDetails.rating,
+        lastScraped: new Date()
+      });
+    } catch (novelDbError) {
+      stats.dbErrors++;
+      console.error(`Error upserting novel ${novelDetails.title} (${startUrl}):`, novelDbError);
+      throw novelDbError;
+    }
+
+    if (!savedNovel) {
+      console.error(
+        `Failed to find or create the novel document in the database for ${startUrl}. Aborting chapter scrape for this novel.`
+      );
+      stats.dbErrors++;
+      return;
+    }
+
+    console.log(`Found/Created Novel: ${savedNovel.title} (ID: ${savedNovel._id})`);
+    stats.novelsProcessed++;
+    stats.dbNovelUpdateSuccess++;
+
+    let startChapterNumber = 1;
+    let highestChapterNumberInDb: number | null = null;
+    try {
+      const highestChapterDoc = await getHighestChapterForNovel(savedNovel._id);
+
+      if (highestChapterDoc && highestChapterDoc.chapterNumber) {
+        highestChapterNumberInDb = highestChapterDoc.chapterNumber;
+        startChapterNumber = highestChapterDoc.chapterNumber + 1;
+        console.log(
+          `\nHighest chapter found in DB for ${savedNovel.title}: ${highestChapterNumberInDb}. Resuming scrape from chapter ${startChapterNumber}.`
+        );
+      } else {
+        console.log(
+          `\nNo existing chapters found in DB for ${savedNovel.title}. Starting scrape from chapter 1.`
+        );
+      }
+    } catch (dbError) {
+      stats.dbErrors++;
+      console.error(`Error querying for highest chapter number for ${savedNovel.title}:`, dbError);
+      console.warn('Assuming start from chapter 1 due to error.');
+      startChapterNumber = 1;
+    }
+
+    if (startChapterNumber > latestChapterNumber) {
+      console.log(
+        `\nNovel "${savedNovel.title}" is already up-to-date (Last chapter in DB: ${
+          highestChapterNumberInDb ?? 'None'
+        }, Latest online: ${latestChapterNumber}). No new chapters to process.`
+      );
+      return;
+    }
+
+    const chaptersBaseUrl = novelDetails.chaptersUrl.split('/chapters')[0];
+    console.log(
+      `\n--- Processing Chapters ${startChapterNumber} to ${latestChapterNumber} for ${savedNovel.title} ---`
+    );
+
+    const chapterNumbers = Array.from(
+      { length: latestChapterNumber - startChapterNumber + 1 },
+      (_, index) => startChapterNumber + index
+    );
+
+    for (const chapterBatch of chunkArray(chapterNumbers, CHAPTER_BATCH_SIZE)) {
+      stats.chaptersAttempted += chapterBatch.length;
+
+      const chapterResults = await mapWithConcurrency(
+        chapterBatch,
+        CHAPTER_CONCURRENCY,
+        async (chapterNumber) => {
+          const chapterUrl = `${chaptersBaseUrl}/chapter-${chapterNumber}`;
+          console.log(
+            `Processing Chapter ${chapterNumber}/${latestChapterNumber}: ${chapterUrl}`
+          );
+
+          try {
+            return await scrapeChapterContent(chapterUrl, chapterNumber);
+          } catch (chapterScrapeError) {
+            stats.chaptersScrapedError++;
+            console.error(
+              `Error processing chapter ${chapterNumber} (${chapterUrl}):`,
+              chapterScrapeError
+            );
+            return {
+              url: chapterUrl,
+              chapterNumber,
+              title: 'Error Scraping Title',
+              content: null
+            } satisfies ChapterData;
+          }
+        }
+      );
+
+      await saveChapterBatch(savedNovel, chapterResults, stats);
+    }
+
+    console.log(`\n--- Finished Processing Chapters for ${savedNovel.title} ---`);
+  } catch (error) {
+    console.error(`An unhandled error occurred processing ${startUrl}:`, error);
+    stats.novelsSkippedOrFailed++;
+  }
+}
+
 // --- Main Execution Logic ---
 async function main() {
   const startTime = Date.now();
@@ -332,47 +588,124 @@ async function main() {
 
   const startUrls = [
     'https://novelfire.net/book/shadow-slave',
-    'https://novelfire.net/book/lord-of-the-mysteries',
     'https://novelfire.net/book/reverend-insanity',
-    'https://novelfire.net/book/infinite-mana-in-the-apocalypse',
-    'https://novelfire.net/book/the-beginning-after-the-end',
+    'https://novelfire.net/book/lord-of-the-mysteries',
+    'https://novelfire.net/book/a-regressors-tale-of-cultivation',
     'https://novelfire.net/book/omniscient-readers-viewpoint',
+    'https://novelfire.net/book/tribulation-of-myriad-races',
+    'https://novelfire.net/book/kill-the-sun',
     'https://novelfire.net/book/advent-of-the-three-calamities',
+    'https://novelfire.net/book/the-authors-pov',
+    'https://novelfire.net/book/young-masters-pov-woke-up-as-a-villain-in-a-game-one-day',
+    'https://novelfire.net/book/the-mirror-legacy',
+    'https://novelfire.net/book/horror-game-developer-my-games-arent-that-scary',
+    'https://novelfire.net/book/who-let-him-cultivate',
+    'https://novelfire.net/book/i-am-god-lslccf',
+    'https://novelfire.net/book/the-legendary-mechanic',
+    'https://novelfire.net/book/diary-of-a-dead-wizard',
+    'https://novelfire.net/book/the-beginning-after-the-end',
+    'https://novelfire.net/book/the-innkeeper',
+    'https://novelfire.net/book/my-house-of-horrors',
+    'https://novelfire.net/book/lord-of-mysteries-2-circle-of-inevitability',
+    'https://novelfire.net/book/lord-of-the-truth',
+    'https://novelfire.net/book/my-longevity-simulation',
+    'https://novelfire.net/book/im-an-infinite-regressor-but-ive-got-stories-to-tell',
+    'https://novelfire.net/book/the-primal-hunter',
+    'https://novelfire.net/book/renegade-immortal',
+    'https://novelfire.net/book/got-dropped-into-a-ghost-story-still-gotta-work',
+    'https://novelfire.net/book/the-academys-weakest-became-a-demon-limited-hunter',
+    'https://novelfire.net/book/pursuit-of-the-truth',
+    'https://novelfire.net/book/chrysalis',
+    'https://novelfire.net/book/my-living-shadow-system-devours-to-make-me-stronger',
+    'https://novelfire.net/book/the-mech-touch',
+    'https://novelfire.net/book/mother-of-learning',
+    'https://novelfire.net/book/the-perfect-run',
+    'https://novelfire.net/book/sword-god-in-a-world-of-magic',
+    'https://novelfire.net/book/strongest-hammer-god',
+    'https://novelfire.net/book/kingdoms-bloodline',
+    'https://novelfire.net/book/top-tier-providence-secretly-cultivate-for-a-thousand-years',
+    'https://novelfire.net/book/throne-of-magical-arcana',
+    'https://novelfire.net/book/global-game-afk-in-the-zombie-apocalypse-game',
+    'https://novelfire.net/book/we-agreed-on-experiencing-life-so-why-did-you-immortals-become-real',
+    'https://novelfire.net/book/beyond-the-timescape',
+    'https://novelfire.net/book/ending-maker',
+    'https://novelfire.net/book/i-was-mistaken-as-a-great-war-commander',
+    'https://novelfire.net/book/the-regressor-and-the-blind-saint',
+    'https://novelfire.net/book/i-shall-seal-the-heavens',
+    'https://novelfire.net/book/a-will-eternal',
+    'https://novelfire.net/book/the-villains-pov',
+    'https://novelfire.net/book/overgeared',
+    'https://novelfire.net/book/trash-of-the-counts-family',
+    'https://novelfire.net/book/dao-of-the-bizarre-immortal',
+    'https://novelfire.net/book/became-the-patron-of-villains',
+    'https://novelfire.net/book/surviving-the-game-as-a-barbarian',
+    'https://novelfire.net/book/kidnapped-dragons-kr-web-novel',
+    'https://novelfire.net/book/the-world-after-the-bad-ending',
+    'https://novelfire.net/book/return-of-the-mount-hua-sect',
+    'https://novelfire.net/book/son-of-the-hero-king',
+    'https://novelfire.net/book/dorothys-forbidden-grimoire',
+    'https://novelfire.net/book/creating-heavenly-laws',
+    'https://novelfire.net/book/supremacy-games',
+    'https://novelfire.net/book/cultivation-online',
+    'https://novelfire.net/book/the-glorious-evolution',
+    'https://novelfire.net/book/the-second-coming-of-gluttony',
+    'https://novelfire.net/book/incompatible-interspecies-wives',
+    'https://novelfire.net/book/myst-might-mayhem',
+    'https://novelfire.net/book/struggling-to-survive-with-regression-power-in-the-primordial-saint-sect',
+    'https://novelfire.net/book/sss-class-suicide-hunter',
+    'https://novelfire.net/book/rezero-kara-hajimeru-isekai-seikatsu',
+    'https://novelfire.net/book/immortality-through-array-formations',
+    'https://novelfire.net/book/infinite-mana-in-the-apocalypse',
+    'https://novelfire.net/book/supreme-harem-god-system',
+    'https://novelfire.net/book/death-game-starting-as-a-trickster-pretending-to-be-a-god',
+    'https://novelfire.net/book/nine-star-hegemon-body-arts',
+    'https://novelfire.net/book/damn-reincarnation',
+    'https://novelfire.net/book/investing-in-the-reborn-empress-she-actually-calls-me-husband',
+    'https://novelfire.net/book/fey-evolution-merchant',
+    'https://novelfire.net/book/omniscient-first-persons-viewpoint',
+    'https://novelfire.net/book/childhood-friend-of-the-zenith',
+    'https://novelfire.net/book/genetic-ascension',
+    'https://novelfire.net/book/cursed-immortality',
+    'https://novelfire.net/book/the-steward-demonic-emperor',
+    'https://novelfire.net/book/simulation-towards-immortality-in-a-group-chat',
+    'https://novelfire.net/book/ill-surpass-the-mc',
+    'https://novelfire.net/book/paragon-of-sin',
+    'https://novelfire.net/book/i-really-am-a-villain',
+    'https://novelfire.net/book/unsheathed',
+    'https://novelfire.net/book/lightning-is-the-only-way',
+    'https://novelfire.net/book/i-fabricated-the-techniques-but-my-disciple-really-mastered-them',
+    'https://novelfire.net/book/path-of-the-extra',
+    'https://novelfire.net/book/naruto-the-wind-calamity',
+    'https://novelfire.net/book/a-soldiers-life',
+    'https://novelfire.net/book/demonic-pornstar-system',
+    'https://novelfire.net/book/the-reincarnated-assassin-is-a-genius-swordsman',
+    'https://novelfire.net/book/seoul-object-story',
+    'https://novelfire.net/book/extras-death-i-am-the-son-of-hades',
+    'https://novelfire.net/book/blood-warlock-succubus-partner-in-the-apocalypse',
+    'https://novelfire.net/book/worlds-end-my-keyword-is-one-more-than-others',
+    'https://novelfire.net/book/the-primordial-record',
+    'https://novelfire.net/book/reincarnation-of-the-strongest-sword-god',
+    'https://novelfire.net/book/city-of-sin',
+    'https://novelfire.net/book/journey-of-the-fate-destroying-emperor',
     'https://novelfire.net/book/supreme-magus',
     'https://novelfire.net/book/why-should-i-stop-being-a-villain',
-    'https://novelfire.net/book/trash-of-the-counts-family',
-    'https://novelfire.net/book/lord-of-mysteries-2-circle-of-inevitability',
     'https://novelfire.net/book/under-the-oak-tree',
     'https://novelfire.net/book/i-was-mistaken-as-a-monstrous-genius-actor',
-    'https://novelfire.net/book/chrysalis',
-    'https://novelfire.net/book/return-of-the-mount-hua-sect',
-    'https://novelfire.net/book/the-perfect-run',
-    'https://novelfire.net/book/throne-of-magical-arcana',
     'https://novelfire.net/book/dimensional-descent',
-    'https://novelfire.net/book/damn-reincarnation',
-    'https://novelfire.net/book/supremacy-games',
-    'https://novelfire.net/book/my-house-of-horrors',
     'https://novelfire.net/book/outside-of-time',
     'https://novelfire.net/book/beast-taming-starting-from-zero',
     'https://novelfire.net/book/atticuss-odyssey-reincarnated-into-a-playground',
     'https://novelfire.net/book/im-really-not-the-demon-gods-lackey',
-    'https://novelfire.net/book/mother-of-learning',
     'https://novelfire.net/book/my-vampire-system',
     'https://novelfire.net/book/the-novels-extra',
-    'https://novelfire.net/book/the-legendary-mechanic',
-    'https://novelfire.net/book/lightning-is-the-only-way',
     'https://novelfire.net/book/kidnapped-dragons',
-    'https://novelfire.net/book/ill-surpass-the-mc',
     'https://novelfire.net/book/the-desolate-era',
     'https://novelfire.net/book/i-am-the-fated-villain',
     'https://novelfire.net/book/custom-made-demon-king',
-    'https://novelfire.net/book/reincarnation-of-the-strongest-sword-god',
-    'https://novelfire.net/book/a-will-eternal',
     'https://novelfire.net/book/youkoso-jitsuryoku-shijou-shugi-no-kyoushitsu-e',
     'https://novelfire.net/book/jobless-reincarnation-mushoku-tensei',
     'https://novelfire.net/book/the-demon-prince-goes-to-the-academy',
     'https://novelfire.net/book/nano-machine-retranslated-version',
-    'https://novelfire.net/book/omniscient-first-persons-viewpoint',
     'https://novelfire.net/book/the-bloodline-system',
     'https://novelfire.net/book/embers-ad-infinitum',
     'https://novelfire.net/book/reincarnated-with-the-strongest-system',
@@ -384,20 +717,13 @@ async function main() {
     'https://novelfire.net/book/hero-of-darkness',
     'https://novelfire.net/book/the-book-eating-magician',
     'https://novelfire.net/book/vainqueur-the-dragon',
-    'https://novelfire.net/book/a-regressors-tale-of-cultivation',
-    'https://novelfire.net/book/a-soldiers-life',
     'https://novelfire.net/book/return-of-the-frozen-player',
-    'https://novelfire.net/book/ending-maker',
-    'https://novelfire.net/book/kingdoms-bloodline',
     'https://novelfire.net/book/descent-of-the-demon-god',
     'https://novelfire.net/book/abandoned-by-my-childhood-friend-i-became-a-war-hero',
     'https://novelfire.net/book/reborn-as-a-demonic-tree',
     'https://novelfire.net/book/ranker-who-lives-twice',
-    'https://novelfire.net/book/the-second-coming-of-gluttony',
     'https://novelfire.net/book/the-protagonists-are-murdered-by-me',
-    'https://novelfire.net/book/sss-class-suicide-hunter',
     'https://novelfire.net/book/i-became-the-pope-now-what',
-    'https://novelfire.net/book/the-innkeeper',
     'https://novelfire.net/book/tyranny-of-steel'
   ];
 
@@ -410,189 +736,9 @@ async function main() {
       ).toISOString()} ---`
     );
 
-    // --- Loop through each URL ---
-    for (const startUrl of startUrls) {
-      console.log(`\n============================================================`);
-      console.log(`Processing Novel URL: ${startUrl}`);
-      console.log(`============================================================\n`);
-
-      try {
-        const novelDetails = await scrapeNovelDetails(startUrl);
-        if (!novelDetails.title || !novelDetails.chaptersUrl) {
-          console.error(
-            `Could not scrape essential novel details (title/chapters URL) for ${startUrl}, skipping this novel.`
-          );
-          stats.novelsSkippedOrFailed++;
-          continue; // Move to the next URL in startUrls
-        }
-        console.log(`\nSuccessfully scraped novel details for: ${novelDetails.title}`);
-        console.log('\n--- Novel Details ---');
-        console.log(novelDetails); // Log details for context
-
-        let latestChapterNumber: number | null = null;
-        if (novelDetails.chapters) {
-          const parsedChapters = parseInt(novelDetails.chapters.replace(/,/g, ''), 10);
-          if (!isNaN(parsedChapters) && parsedChapters > 0) {
-            latestChapterNumber = parsedChapters;
-            console.log(`\nUsing total chapters count from novel details: ${latestChapterNumber}`);
-          } else {
-            console.error(
-              `Could not parse valid chapter count ('${novelDetails.chapters}') from novel details for ${novelDetails.title}.`
-            );
-          }
-        } else {
-          console.error(`Novel details did not contain a chapter count for ${novelDetails.title}.`);
-        }
-
-        if (latestChapterNumber === null) {
-          console.error(
-            `Failed to determine the latest chapter number for ${novelDetails.title}. Aborting chapter scrape for this novel.`
-          );
-          stats.novelsSkippedOrFailed++;
-          continue; // Skip to next novel URL
-        }
-
-        let savedNovel: INovel | null = null;
-        console.log(`\n--- Finding/Updating ${novelDetails.title} in Database ---`);
-        try {
-          savedNovel = await upsertNovelByUrl(startUrl, {
-            title: novelDetails.title,
-            author: novelDetails.author,
-            rank: novelDetails.rank,
-            totalChapters: novelDetails.chapters,
-            views: novelDetails.views,
-            bookmarks: novelDetails.bookmarks,
-            status: novelDetails.status,
-            genres: novelDetails.genres,
-            summary: novelDetails.summary,
-            chaptersUrl: novelDetails.chaptersUrl,
-            imageUrl: novelDetails.imageUrl,
-            rating: novelDetails.rating,
-            lastScraped: new Date()
-          });
-        } catch (novelDbError) {
-          stats.dbErrors++;
-          console.error(
-            `Error upserting novel ${novelDetails.title} (${startUrl}):`,
-            novelDbError
-          );
-          throw novelDbError; // Re-throw to be caught by the outer try/catch for this novel
-        }
-
-        if (savedNovel) {
-          console.log(`Found/Created Novel: ${savedNovel.title} (ID: ${savedNovel._id})`);
-          stats.novelsProcessed++;
-          stats.dbNovelUpdateSuccess++;
-
-          let startChapterNumber = 1;
-          let highestChapterNumberInDb: number | null = null;
-          try {
-            const highestChapterDoc = await getHighestChapterForNovel(savedNovel._id);
-
-            if (highestChapterDoc && highestChapterDoc.chapterNumber) {
-              highestChapterNumberInDb = highestChapterDoc.chapterNumber;
-              startChapterNumber = highestChapterDoc.chapterNumber + 1;
-              console.log(
-                `\nHighest chapter found in DB for ${savedNovel.title}: ${highestChapterNumberInDb}. Resuming scrape from chapter ${startChapterNumber}.`
-              );
-            } else {
-              console.log(
-                `\nNo existing chapters found in DB for ${savedNovel.title}. Starting scrape from chapter 1.`
-              );
-            }
-          } catch (dbError) {
-            stats.dbErrors++;
-            console.error(
-              `Error querying for highest chapter number for ${savedNovel.title}:`,
-              dbError
-            );
-            console.warn('Assuming start from chapter 1 due to error.');
-            startChapterNumber = 1;
-          }
-
-          if (startChapterNumber > latestChapterNumber) {
-            console.log(
-              `\nNovel "${savedNovel.title}" is already up-to-date (Last chapter in DB: ${
-                highestChapterNumberInDb ?? 'None'
-              }, Latest online: ${latestChapterNumber}). No new chapters to process.`
-            );
-          } else {
-            const chaptersBaseUrl = novelDetails.chaptersUrl.split('/chapters')[0];
-            console.log(
-              `\n--- Processing Chapters ${startChapterNumber} to ${latestChapterNumber} for ${savedNovel.title} ---`
-            );
-
-            for (let i = startChapterNumber; i <= latestChapterNumber; i++) {
-              stats.chaptersAttempted++;
-              const chapterUrl = `${chaptersBaseUrl}/chapter-${i}`;
-              console.log(`Processing Chapter ${i}/${latestChapterNumber}: ${chapterUrl}`);
-              try {
-                const chapterData = await scrapeChapterContent(chapterUrl, i);
-                if (chapterData.content) {
-                  stats.chaptersScrapedSuccess++;
-                  try {
-                    await delay(DB_OPERATION_DELAY_MS);
-                    const savedChapter = await upsertChapter(savedNovel._id, {
-                      chapterNumber: chapterData.chapterNumber,
-                      url: chapterData.url,
-                      title: chapterData.title,
-                      content: chapterData.content
-                    });
-                    if (savedChapter) {
-                      stats.dbChapterUpdateSuccess++;
-                      console.log(
-                        `  Saved/Updated Chapter ${savedChapter.chapterNumber} (ID: ${savedChapter._id})`
-                      );
-                    } else {
-                      console.warn(
-                        `  DB op ok, but failed to get Chapter ${chapterData.chapterNumber} doc back.`
-                      );
-                      stats.dbErrors++;
-                    }
-                  } catch (chapterDbError) {
-                    stats.dbErrors++;
-                    console.error(
-                      `  Error saving chapter ${chapterData.chapterNumber} to DB:`,
-                      chapterDbError
-                    );
-                  }
-                } else {
-                  stats.chaptersWithEmptyContent++;
-                  console.warn(
-                    `Chapter ${i} scraped but content was empty or not found. Skipping save.`
-                  );
-                }
-
-                // Add request delay *after* processing a chapter
-                await delay(REQUEST_DELAY_MS);
-              } catch (chapterScrapeError) {
-                // Catch error scraping/saving this specific chapter
-                stats.chaptersScrapedError++;
-                console.error(`Error processing chapter ${i} (${chapterUrl}):`, chapterScrapeError);
-                // Continue to the next chapter even if one fails
-              }
-            }
-            console.log(`\n--- Finished Processing Chapters for ${savedNovel.title} ---`);
-          }
-        } else {
-          console.error(
-            `Failed to find or create the novel document in the database for ${startUrl}. Aborting chapter scrape for this novel.`
-          );
-          stats.dbErrors++;
-        }
-      } catch (error) {
-        console.error(`An unhandled error occurred processing ${startUrl}:`, error);
-        stats.novelsSkippedOrFailed++;
-      }
-
-      // Small delay between processing different novels
-      console.log(
-        `\n--- Finished processing ${startUrl}. Waiting ${
-          INTER_NOVEL_DELAY_MS / 1000
-        }s before next novel... ---`
-      );
-      await delay(INTER_NOVEL_DELAY_MS);
-    }
+    await mapWithConcurrency(startUrls, NOVEL_CONCURRENCY, async (startUrl) => {
+      await processNovel(startUrl, stats);
+    });
   } catch (error) {
     console.error('A fatal error occurred during the scraper run:', error);
     stats.novelsSkippedOrFailed = startUrls.length - stats.novelsProcessed; // Assume all remaining failed

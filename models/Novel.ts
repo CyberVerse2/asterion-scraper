@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, QueryResult, QueryResultRow } from 'pg';
 
 export interface INovel {
   _id: number;
@@ -67,14 +67,84 @@ export interface PaginatedResult<T> {
   total: number;
 }
 
-let pool: Pool;
+let pool: Pool | undefined;
 let schemaInitialized = false;
 
 function getPool(): Pool {
   if (!pool) {
-    pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      allowExitOnIdle: true,
+      max: 5,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000
+    });
+
+    pool.on('error', (error) => {
+      console.error('PostgreSQL pool error on idle client:', error);
+      pool = undefined;
+    });
   }
   return pool;
+}
+
+function isRetryableConnectionError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const retryableCodes = new Set([
+    'EADDRNOTAVAIL',
+    'ECONNRESET',
+    'EPIPE',
+    'ETIMEDOUT',
+    'ENETUNREACH',
+    '57P01'
+  ]);
+
+  const code = 'code' in error ? String(error.code) : undefined;
+  if (code && retryableCodes.has(code)) {
+    return true;
+  }
+
+  return /terminat|socket|connection|read EADDRNOTAVAIL/i.test(error.message);
+}
+
+async function resetPool(): Promise<void> {
+  if (!pool) {
+    return;
+  }
+
+  const currentPool = pool;
+  pool = undefined;
+
+  try {
+    await currentPool.end();
+  } catch (error) {
+    console.error('Error while closing PostgreSQL pool:', error);
+  }
+}
+
+async function runQuery<T extends QueryResultRow = any>(
+  text: string,
+  params?: any[]
+): Promise<QueryResult<T>> {
+  try {
+    return await getPool().query<T>(text, params);
+  } catch (error) {
+    if (!isRetryableConnectionError(error)) {
+      throw error;
+    }
+
+    console.warn(
+      `Retrying PostgreSQL query after connection error: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+
+    await resetPool();
+    return getPool().query<T>(text, params);
+  }
 }
 
 function mapNovelRow(row: any): INovel {
@@ -129,7 +199,7 @@ async function initializeSchema(): Promise<void> {
     return;
   }
 
-  await getPool().query(`
+  await runQuery(`
     CREATE TABLE IF NOT EXISTS novels (
       id BIGSERIAL PRIMARY KEY,
       title TEXT NOT NULL,
@@ -152,7 +222,7 @@ async function initializeSchema(): Promise<void> {
     );
   `);
 
-  await getPool().query(`
+  await runQuery(`
     CREATE TABLE IF NOT EXISTS chapters (
       id BIGSERIAL PRIMARY KEY,
       novel_id BIGINT NOT NULL REFERENCES novels(id) ON DELETE CASCADE,
@@ -166,7 +236,7 @@ async function initializeSchema(): Promise<void> {
     );
   `);
 
-  await getPool().query(`
+  await runQuery(`
     CREATE INDEX IF NOT EXISTS idx_chapters_novel_id ON chapters (novel_id);
   `);
 
@@ -189,14 +259,14 @@ export async function connectDB(): Promise<void> {
 }
 
 export async function disconnectDB(): Promise<void> {
-  await getPool().end();
+  await resetPool();
 }
 
 export async function upsertNovelByUrl(
   novelUrl: string,
   payload: NovelUpdatePayload
 ): Promise<INovel | null> {
-  const result = await getPool().query(
+  const result = await runQuery(
     `
       INSERT INTO novels (
         title, novel_url, author, rank, total_chapters, views, bookmarks, status,
@@ -261,7 +331,7 @@ export async function listNovels(
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const countResult = await getPool().query(
+  const countResult = await runQuery(
     `
       SELECT COUNT(*)::BIGINT AS total
       FROM novels
@@ -283,7 +353,7 @@ export async function listNovels(
     offsetClause = `OFFSET $${listValues.length}`;
   }
 
-  const rowsResult = await getPool().query(
+  const rowsResult = await runQuery(
     `
       SELECT *
       FROM novels
@@ -302,7 +372,7 @@ export async function listNovels(
 }
 
 export async function getNovelById(novelId: number): Promise<INovel | null> {
-  const result = await getPool().query(
+  const result = await runQuery(
     `
       SELECT *
       FROM novels
@@ -322,7 +392,7 @@ export async function getNovelById(novelId: number): Promise<INovel | null> {
 export async function getHighestChapterForNovel(
   novelId: number
 ): Promise<{ chapterNumber: number } | null> {
-  const result = await getPool().query(
+  const result = await runQuery(
     `
       SELECT chapter_number
       FROM chapters
@@ -344,7 +414,7 @@ export async function upsertChapter(
   novelId: number,
   chapter: { chapterNumber: number; url: string; title: string; content: string }
 ): Promise<IChapter | null> {
-  const result = await getPool().query(
+  const result = await runQuery(
     `
       INSERT INTO chapters (novel_id, chapter_number, url, title, content)
       VALUES ($1, $2, $3, $4, $5)
@@ -365,13 +435,47 @@ export async function upsertChapter(
   return mapChapterRow(result.rows[0]);
 }
 
+export async function upsertChapters(
+  novelId: number,
+  chapters: Array<{ chapterNumber: number; url: string; title: string; content: string }>
+): Promise<IChapter[]> {
+  if (chapters.length === 0) {
+    return [];
+  }
+
+  const values: Array<number | string> = [];
+  const valuePlaceholders = chapters.map((chapter, index) => {
+    const offset = index * 5;
+    values.push(novelId, chapter.chapterNumber, chapter.url, chapter.title, chapter.content);
+    return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5})`;
+  });
+
+  const result = await runQuery(
+    `
+      INSERT INTO chapters (novel_id, chapter_number, url, title, content)
+      VALUES ${valuePlaceholders.join(', ')}
+      ON CONFLICT (novel_id, chapter_number) DO UPDATE SET
+        url = EXCLUDED.url,
+        title = EXCLUDED.title,
+        content = EXCLUDED.content,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    values
+  );
+
+  return result.rows
+    .map(mapChapterRow)
+    .sort((left, right) => left.chapterNumber - right.chapterNumber);
+}
+
 export async function listChaptersByNovelId(
   novelId: number,
   options: ListOptions
 ): Promise<PaginatedResult<IChapterListItem>> {
   const values: number[] = [novelId];
 
-  const countResult = await getPool().query(
+  const countResult = await runQuery(
     `
       SELECT COUNT(*)::BIGINT AS total
       FROM chapters
@@ -394,7 +498,7 @@ export async function listChaptersByNovelId(
     offsetClause = `OFFSET $${listValues.length}`;
   }
 
-  const result = await getPool().query(
+  const result = await runQuery(
     `
       SELECT id, novel_id, chapter_number, url, title, created_at, updated_at
       FROM chapters
@@ -416,7 +520,7 @@ export async function getChapterByNovelIdAndNumber(
   novelId: number,
   chapterNumber: number
 ): Promise<IChapter | null> {
-  const result = await getPool().query(
+  const result = await runQuery(
     `
       SELECT *
       FROM chapters
@@ -434,7 +538,7 @@ export async function getChapterByNovelIdAndNumber(
 }
 
 export async function getChapterById(chapterId: number): Promise<IChapter | null> {
-  const result = await getPool().query(
+  const result = await runQuery(
     `
       SELECT *
       FROM chapters
@@ -472,7 +576,7 @@ export async function findNovelsMissingData(options: {
     limitClause = `LIMIT $${values.length}`;
   }
 
-  const result = await getPool().query(
+  const result = await runQuery(
     `
       SELECT *
       FROM novels
@@ -507,7 +611,7 @@ export async function updateNovelFields(
   }
 
   values.push(novelId);
-  await getPool().query(
+  await runQuery(
     `
       UPDATE novels
       SET ${updates.join(', ')}, updated_at = NOW()
