@@ -12,6 +12,23 @@ import {
   connectDB,
   disconnectDB
 } from './models/Novel.js';
+import {
+  initUserTables,
+  updateUser,
+  getUserStats,
+  getReadingProgress,
+  upsertReadingProgress,
+  getBookmarks,
+  createBookmark,
+  deleteBookmark,
+  getLibrary,
+  addToLibrary,
+  removeFromLibrary,
+  getReadingHistory,
+  getUserPreferences,
+  updateUserPreferences,
+} from './models/User.js';
+import { authenticateRequest, HttpError } from './middleware/auth.js';
 
 dotenv.config();
 
@@ -431,8 +448,188 @@ export function createApiHandler(deps: ApiDependencies = defaultDependencies) {
         return jsonResponse(200, { data: chapter });
       }
 
+      // ── Auth ──────────────────────────────────────────────
+
+      if (method === 'POST' && pathname === '/auth/apple') {
+        const body = await readJsonBody(request);
+        if (!body) {
+          return jsonResponse(400, { error: 'Request body must be a valid JSON object.' });
+        }
+
+        const identityToken = body.identityToken;
+        const appleUserId = body.appleUserId;
+        const email = typeof body.email === 'string' ? body.email : null;
+
+        if (typeof identityToken !== 'string' || typeof appleUserId !== 'string') {
+          return jsonResponse(400, { error: 'Fields "identityToken" and "appleUserId" are required.' });
+        }
+
+        // Clerk handles Apple auth client-side. Return a placeholder session token.
+        return jsonResponse(200, {
+          sessionToken: 'placeholder-legacy-token',
+          user: {
+            id: appleUserId,
+            email,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        });
+      }
+
+      // ── User Data (auth required) ─────────────────────────
+
+      if (pathname === '/me/stats' && method === 'GET') {
+        const { user } = await authenticateRequest(request);
+        const stats = await getUserStats(user.id);
+        return jsonResponse(200, { data: stats });
+      }
+
+      if (pathname === '/me' && method === 'GET') {
+        const { user } = await authenticateRequest(request);
+        return jsonResponse(200, { data: user });
+      }
+
+      if (pathname === '/me' && method === 'PATCH') {
+        const { user } = await authenticateRequest(request);
+        const body = await readJsonBody(request);
+        if (!body) {
+          return jsonResponse(400, { error: 'Request body must be a valid JSON object.' });
+        }
+        const updated = await updateUser(user.id, {
+          email: typeof body.email === 'string' ? body.email : undefined,
+          username: typeof body.username === 'string' ? body.username : undefined,
+          avatarUrl: typeof body.avatarUrl === 'string' ? body.avatarUrl : undefined,
+        });
+        return jsonResponse(200, { data: updated });
+      }
+
+      if (pathname === '/me/progress' && method === 'GET') {
+        const { user } = await authenticateRequest(request);
+        const novelId = url.searchParams.get('novelId');
+        const progress = await getReadingProgress(
+          user.id,
+          novelId ? Number(novelId) : undefined
+        );
+        if (novelId) {
+          return jsonResponse(200, { data: progress[0] ?? null });
+        }
+        return jsonResponse(200, { data: progress });
+      }
+
+      if (pathname === '/me/progress' && method === 'PUT') {
+        const { user } = await authenticateRequest(request);
+        const body = await readJsonBody(request);
+        if (!body) {
+          return jsonResponse(400, { error: 'Request body must be a valid JSON object.' });
+        }
+        const novelId = Number(body.novelId);
+        const chapterId = Number(body.chapterId);
+        const currentLine = Number(body.currentLine);
+        const totalLines = Number(body.totalLines);
+        const percentage = typeof body.percentage === 'number' ? body.percentage : null;
+
+        if (!novelId || !chapterId || isNaN(currentLine) || isNaN(totalLines)) {
+          return jsonResponse(400, { error: 'Fields "novelId", "chapterId", "currentLine", "totalLines" are required.' });
+        }
+
+        const progress = await upsertReadingProgress(user.id, novelId, chapterId, currentLine, totalLines, percentage);
+        return jsonResponse(200, { data: progress });
+      }
+
+      if (pathname === '/me/bookmarks' && method === 'GET') {
+        const { user } = await authenticateRequest(request);
+        const bookmarks = await getBookmarks(user.id);
+        return jsonResponse(200, { data: bookmarks });
+      }
+
+      if (pathname === '/me/bookmarks' && method === 'POST') {
+        const { user } = await authenticateRequest(request);
+        const body = await readJsonBody(request);
+        if (!body) {
+          return jsonResponse(400, { error: 'Request body must be a valid JSON object.' });
+        }
+        const novelId = Number(body.novelId);
+        const chapterId = Number(body.chapterId);
+        const note = typeof body.note === 'string' ? body.note : null;
+
+        if (!novelId || !chapterId) {
+          return jsonResponse(400, { error: 'Fields "novelId" and "chapterId" are required.' });
+        }
+
+        const bookmark = await createBookmark(user.id, novelId, chapterId, note);
+        return jsonResponse(200, { data: bookmark });
+      }
+
+      const bookmarkDeleteMatch = pathname.match(/^\/me\/bookmarks\/(.+)$/);
+      if (method === 'DELETE' && bookmarkDeleteMatch) {
+        const { user } = await authenticateRequest(request);
+        const bookmarkId = Number(bookmarkDeleteMatch[1]);
+        const deleted = await deleteBookmark(bookmarkId, user.id);
+        return jsonResponse(200, { data: { deleted } });
+      }
+
+      if (pathname === '/me/library' && method === 'GET') {
+        const { user } = await authenticateRequest(request);
+        const library = await getLibrary(user.id);
+        return jsonResponse(200, { data: library });
+      }
+
+      if (pathname === '/me/library' && method === 'POST') {
+        const { user } = await authenticateRequest(request);
+        const body = await readJsonBody(request);
+        if (!body) {
+          return jsonResponse(400, { error: 'Request body must be a valid JSON object.' });
+        }
+        const novelId = Number(body.novelId);
+        if (!novelId) {
+          return jsonResponse(400, { error: 'Field "novelId" is required.' });
+        }
+        const entry = await addToLibrary(user.id, novelId);
+        return jsonResponse(200, { data: entry });
+      }
+
+      const libraryDeleteMatch = pathname.match(/^\/me\/library\/(.+)$/);
+      if (method === 'DELETE' && libraryDeleteMatch) {
+        const { user } = await authenticateRequest(request);
+        const novelId = Number(libraryDeleteMatch[1]);
+        const deleted = await removeFromLibrary(user.id, novelId);
+        return jsonResponse(200, { data: { deleted } });
+      }
+
+      if (pathname === '/me/history' && method === 'GET') {
+        const { user } = await authenticateRequest(request);
+        const limit = parseNonNegativeInt(url.searchParams.get('limit') ?? '20') ?? 20;
+        const offset = parseNonNegativeInt(url.searchParams.get('offset') ?? '0') ?? 0;
+        const history = await getReadingHistory(user.id, limit, offset);
+        return jsonResponse(200, { data: history });
+      }
+
+      if (pathname === '/me/preferences' && method === 'GET') {
+        const { user } = await authenticateRequest(request);
+        const prefs = await getUserPreferences(user.id);
+        return jsonResponse(200, { data: prefs });
+      }
+
+      if (pathname === '/me/preferences' && method === 'PATCH') {
+        const { user } = await authenticateRequest(request);
+        const body = await readJsonBody(request);
+        if (!body) {
+          return jsonResponse(400, { error: 'Request body must be a valid JSON object.' });
+        }
+        const prefs = await updateUserPreferences(user.id, {
+          readingGoal: typeof body.readingGoal === 'number' ? body.readingGoal : undefined,
+          darkMode: typeof body.darkMode === 'boolean' ? body.darkMode : undefined,
+          notificationsOn: typeof body.notificationsOn === 'boolean' ? body.notificationsOn : undefined,
+          fontSizePref: typeof body.fontSizePref === 'string' ? body.fontSizePref : undefined,
+        });
+        return jsonResponse(200, { data: prefs });
+      }
+
       return jsonResponse(404, { error: 'Route not found.' });
     } catch (error) {
+      if (error instanceof HttpError) {
+        return jsonResponse(error.status, { error: error.message });
+      }
       console.error('API request error:', error);
       return jsonResponse(500, { error: 'Internal server error.' });
     }
@@ -441,6 +638,7 @@ export function createApiHandler(deps: ApiDependencies = defaultDependencies) {
 
 export async function startApiServer(deps: ApiDependencies = defaultDependencies): Promise<void> {
   await deps.connectDB();
+  await initUserTables();
 
   const port = Number(process.env.PORT ?? 3000);
   const server = Bun.serve({

@@ -125,7 +125,7 @@ async function resetPool(): Promise<void> {
   }
 }
 
-async function runQuery<T extends QueryResultRow = any>(
+export async function runQuery<T extends QueryResultRow = any>(
   text: string,
   params?: any[]
 ): Promise<QueryResult<T>> {
