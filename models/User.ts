@@ -220,21 +220,23 @@ export async function initUserTables(): Promise<void> {
 }
 
 export async function findOrCreateUser(clerkUserId: string): Promise<IUser> {
+  const inserted = await runQuery(
+    `INSERT INTO users (clerk_user_id) VALUES ($1)
+     ON CONFLICT (clerk_user_id) DO UPDATE SET updated_at = NOW()
+     RETURNING *`,
+    [clerkUserId]
+  );
+
+  if (inserted.rows.length > 0) {
+    return mapUserRow(inserted.rows[0]);
+  }
+
   const existing = await runQuery(
     'SELECT * FROM users WHERE clerk_user_id = $1 LIMIT 1',
     [clerkUserId]
   );
 
-  if (existing.rows.length > 0) {
-    return mapUserRow(existing.rows[0]);
-  }
-
-  const created = await runQuery(
-    'INSERT INTO users (clerk_user_id) VALUES ($1) RETURNING *',
-    [clerkUserId]
-  );
-
-  return mapUserRow(created.rows[0]);
+  return mapUserRow(existing.rows[0]);
 }
 
 export async function getUserById(userId: number): Promise<IUser | null> {
